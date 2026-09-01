@@ -12,7 +12,7 @@ export default defineConfig({
       48: 'icons/icon-48.png',
       128: 'icons/icon-128.png',
     },
-    permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs'],
+    permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs', 'debugger'],
     host_permissions: ['<all_urls>'],
     optional_permissions: ['<all_urls>'],
     action: {

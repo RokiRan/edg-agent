@@ -186,7 +186,7 @@ export interface EdgActArgs {
   y?: number;
 }
 
-export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: boolean; info: string }> {
+export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: boolean; info: string; [k: string]: unknown }> {
   const trim = (s: string, n: number): string => {
     const t = (s || '').trim();
     return t.length > n ? t.slice(0, n) : t;
@@ -516,5 +516,83 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
     };
   }
 
+
+  // ---- CDP prep / utility branches (self-contained, zero module-level refs) ----
+
+  if (tool === 'click_prep') {
+    const id = typeof args.id === 'number' ? args.id : -1;
+    const el = byId(id);
+    if (!el) return { ok: false, info: 'element not found' };
+    const tag = el.tagName.toLowerCase();
+    const text = trim(
+      (el as HTMLElement).innerText || (el as HTMLInputElement).value || '',
+      30,
+    );
+    (el as HTMLElement).scrollIntoView({ block: 'center' });
+    await sleep(200);
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    await move(st.cur, stateRef, cx, cy);
+    setStatus(st.status, st.cur, '点击');
+    ripple(st.root, cx, cy);
+    return { ok: true, x: cx, y: cy, tag, text, info: `clicked <${tag}> "${text}"` };
+  }
+
+  if (tool === 'click_at_prep') {
+    const fx = typeof args.x === 'number' ? args.x : NaN;
+    const fy = typeof args.y === 'number' ? args.y : NaN;
+    const x = Math.round(fx * window.innerWidth);
+    const y = Math.round(fy * window.innerHeight);
+    const el = document.elementFromPoint(x, y);
+    if (!el) return { ok: false, info: 'no element at point' };
+    const tag = el.tagName.toLowerCase();
+    await move(st.cur, stateRef, x, y);
+    setStatus(st.status, st.cur, '点击');
+    ripple(st.root, x, y);
+    return { ok: true, x, y, tag, info: `clicked at (${x},${y}) <${tag}>` };
+  }
+
+  if (tool === 'type_prep') {
+    const id = typeof args.id === 'number' ? args.id : -1;
+    const text = typeof args.text === 'string' ? args.text : '';
+    const el = byId(id);
+    if (!el) return { ok: false, info: 'element not found' };
+    const tag = el.tagName.toLowerCase();
+    const htmlEl = el as HTMLElement;
+    if (htmlEl instanceof HTMLSelectElement) {
+      return { ok: false, info: 'use select tool' };
+    }
+    (htmlEl as HTMLElement).scrollIntoView({ block: 'center' });
+    await sleep(200);
+    const rect = htmlEl.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    await move(st.cur, stateRef, cx, cy);
+    setStatus(st.status, st.cur, '输入');
+    if (
+      htmlEl instanceof HTMLInputElement ||
+      htmlEl instanceof HTMLTextAreaElement
+    ) {
+      htmlEl.focus();
+      return { ok: true, editable: true, tag, info: `typed "${text}" into <${tag}>` };
+    }
+    const ceAttr = htmlEl.getAttribute('contenteditable');
+    if (ceAttr === '' || ceAttr === 'true') {
+      htmlEl.focus();
+      return { ok: true, editable: true, tag, info: `typed "${text}" into contenteditable <${tag}>` };
+    }
+    return { ok: false, info: `unsupported element type <${tag}>` };
+  }
+
+  if (tool === 'action_done') {
+    await sleep(150);
+    setStatus(st.status, st.cur, '');
+    return { ok: true, info: 'done' };
+  }
+
+  if (tool === 'viewport_size') {
+    return { ok: true, w: window.innerWidth, h: window.innerHeight, info: 'viewport' };
+  }
   return { ok: false, info: `unknown tool ${tool}` };
 }

@@ -11,8 +11,11 @@ import {
 } from './actions';
 import { getTargetTabId } from './targetTab';
 import { buildSystemPrompt, buildSnapshotMessage } from './prompt';
+import { cdpClick, cdpInsertText, cdpWheel, cdpDetach } from './cdp';
 import type { LLMSettings } from '../types';
 
+/** 注入函数 edgAct 的返回值（含 CDP prep 分支的额外字段）。 */
+type EdgActResult = { ok: boolean; info: string; [k: string]: unknown };
 export interface AgentStep {
   tool: string;
   args: Record<string, unknown>;
@@ -51,6 +54,15 @@ function safeHideOverlay(tabId: number): void {
     chrome.scripting.executeScript({ target: { tabId }, func: hideOverlay }, () => {
       void chrome.runtime.lastError;
     });
+  } catch {
+    // ignore
+  }
+}
+
+/** 终态出口附带 cdpDetach（chrome.debugger 已在 cdp.ts 内部对 lastError 自容错）。 */
+async function safeCdpDetach(tabId: number): Promise<void> {
+  try {
+    await cdpDetach(tabId);
   } catch {
     // ignore
   }
@@ -165,6 +177,7 @@ export async function runAgentTask(
   // 首轮：取快照 + 显示 overlay
   let snapshot = await runInPage<PageSnapshot>(tabId, domSnapshot, []);
   if (!snapshot) {
+    await safeCdpDetach(tabId);
     safeHideOverlay(tabId);
     const errMsg = lastPageError ?? '未知错误';
     const isPerm = /Cannot access|permission|未授予/i.test(errMsg);
@@ -189,6 +202,7 @@ export async function runAgentTask(
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (signal?.aborted) {
+      await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
       return { status: 'stopped', summary: '用户已中止' };
     }
@@ -224,17 +238,18 @@ export async function runAgentTask(
     try {
       raw = await chat(settings, messages);
     } catch (err) {
+      await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
       const msg = err instanceof Error ? err.message : String(err);
       return { status: 'failed', summary: `LLM 调用失败: ${msg}` };
     }
-
     const json = extractJson(raw);
     if (!json) {
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
       messages.push({ role: 'user', content: '格式错误，请只回复一个 JSON 动作' });
       if (consecutiveFormatErrors >= 2) {
+        await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
         return { status: 'failed', summary: '模型输出格式错误' };
       }
@@ -249,6 +264,7 @@ export async function runAgentTask(
       messages.push({ role: 'assistant', content: raw });
       messages.push({ role: 'user', content: '格式错误，请只回复一个 JSON 动作' });
       if (consecutiveFormatErrors >= 2) {
+        await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
         return { status: 'failed', summary: '模型输出格式错误' };
       }
@@ -275,6 +291,7 @@ export async function runAgentTask(
           allowed = false;
         }
         if (!allowed) {
+          await safeCdpDetach(tabId);
           safeHideOverlay(tabId);
           return { status: 'failed', summary: '用户拒绝了高危操作' };
         }
@@ -289,9 +306,22 @@ export async function runAgentTask(
 
     if (tool === 'click') {
       const id = typeof action.id === 'number' ? action.id : -1;
-      const res = (await runInPage(tabId, edgAct, ['click', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
-      ok = !!res.ok;
-      info = res.info;
+      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_prep', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      if (!prep.ok) {
+        ok = false;
+        info = prep.info ?? 'element not found';
+      } else {
+        const cdpOk = await cdpClick(tabId, Number(prep.x), Number(prep.y));
+        if (cdpOk) {
+          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+          ok = true;
+          info = String(prep.info);
+        } else {
+          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+          ok = !!r.ok;
+          info = r.ok ? `${r.info} (dom)` : r.info;
+        }
+      }
       // 等可能的跳页
       const { promise: waitP, resolve: waitR } = Promise.withResolvers<void>();
       setTimeout(waitR, 800);
@@ -308,13 +338,26 @@ export async function runAgentTask(
     } else if (tool === 'type') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const text = typeof action.text === 'string' ? action.text : '';
-      const res = (await runInPage(tabId, edgAct, ['type', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
-      ok = !!res.ok;
-      info = res.info;
+      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['type_prep', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      if (!prep.ok) {
+        ok = false;
+        info = prep.info ?? 'element not found';
+      } else {
+        const cdpOk = await cdpInsertText(tabId, text);
+        if (cdpOk) {
+          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+          ok = true;
+          info = String(prep.info);
+        } else {
+          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['type', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+          ok = !!r.ok;
+          info = r.ok ? `${r.info} (dom)` : r.info;
+        }
+      }
     } else if (tool === 'select') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const value = typeof action.value === 'string' ? action.value : '';
-      const res = (await runInPage(tabId, edgAct, ['select', { id, value } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['select', { id, value } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'scroll') {
@@ -323,9 +366,24 @@ export async function runAgentTask(
         | 'down'
         | 'top'
         | 'bottom';
-      const res = (await runInPage(tabId, edgAct, ['scroll', { direction: dir } as EdgActArgs])) ?? { ok: false, info: 'no result' };
-      ok = !!res.ok;
-      info = res.info;
+      const vs = (await runInPage<EdgActResult>(tabId, edgAct, ['viewport_size', {} as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const deltaY = dir === 'down' ? 600 : dir === 'up' ? -600 : 0;
+      const canWheel = vs.ok && (dir === 'down' || dir === 'up');
+      let wheeled = false;
+      if (canWheel) {
+        const w = Number(vs.w);
+        const h = Number(vs.h);
+        wheeled = await cdpWheel(tabId, w / 2, h / 2, deltaY);
+      }
+      if (wheeled) {
+        await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+        ok = true;
+        info = `scrolled ${dir}`;
+      } else {
+        const res = (await runInPage<EdgActResult>(tabId, edgAct, ['scroll', { direction: dir } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+        ok = !!res.ok;
+        info = res.info;
+      }
     } else if (tool === 'click_at') {
       // 已知取舍：坐标动作无法判定目标文本，跳过高危闸
       const x = typeof action.x === 'number' ? action.x : NaN;
@@ -334,14 +392,27 @@ export async function runAgentTask(
         ok = false;
         info = 'invalid coordinates';
       } else {
-        const res = (await runInPage(tabId, edgAct, ['click_at', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
-        ok = !!res.ok;
-        info = res.info;
+        const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at_prep', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+        if (!prep.ok) {
+          ok = false;
+          info = prep.info ?? 'no element at point';
+        } else {
+          const cdpOk = await cdpClick(tabId, Number(prep.x), Number(prep.y));
+          if (cdpOk) {
+            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+            ok = true;
+            info = String(prep.info);
+          } else {
+            const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+            ok = !!r.ok;
+            info = r.ok ? `${r.info} (dom)` : r.info;
+          }
+        }
       }
     } else if (tool === 'type_focused') {
       // 已知取舍：focused 动作无法从快照确定目标文本，跳过高危闸
       const text = typeof action.text === 'string' ? action.text : '';
-      const res = (await runInPage(tabId, edgAct, ['type_focused', { text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['type_focused', { text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'navigate') {
@@ -363,6 +434,7 @@ export async function runAgentTask(
         resolve(t);
       });
       if (created?.id !== undefined) {
+        await safeCdpDetach(tabId);
         tabId = created.id;
         await waitForTabComplete(created.id);
         ok = true;
@@ -389,6 +461,7 @@ export async function runAgentTask(
       onStep({ tool, args: argsForStep, ok, info });
       continue;
     } else if (tool === 'done') {
+      await safeCdpDetach(tabId);
       const summary = typeof action.summary === 'string' ? action.summary : '任务完成';
       lastSummary = summary;
       onStep({ tool, args: argsForStep, ok: true, info: summary });
@@ -425,6 +498,7 @@ export async function runAgentTask(
     });
   }
 
+  await safeCdpDetach(tabId);
   safeHideOverlay(tabId);
   return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${MAX_STEPS}` };
 }
