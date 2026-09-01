@@ -7,6 +7,7 @@ export default defineConfig({
     version: '0.1.0',
     description: 'Chat with an AI agent in the side panel to operate your browser.',
     permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs'],
+    optional_permissions: ['<all_urls>'],
     action: {},
     commands: {
       'toggle-side-panel': {

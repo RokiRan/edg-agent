@@ -7,8 +7,14 @@ export interface LLMSettings {
   model: string;
 }
 
+import type { AgentStep } from './agent/loop';
+export type { AgentStep };
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  kind?: 'text' | 'agent';
+  steps?: AgentStep[];
+  status?: 'running' | 'done' | 'failed' | 'stopped' | 'waiting';
 }

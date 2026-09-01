@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>测试搜索站</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      form { display: flex; gap: 8px; align-items: center; }
+      input, select, button { font: inherit; padding: 4px 8px; }
+      ul { margin-top: 16px; padding-left: 20px; }
+      li { margin: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>测试搜索站</h1>
+      <form id="searchForm">
+        <input id="q" type="text" placeholder="请输入关键词" />
+        <select id="category">
+          <option value="all">全部</option>
+          <option value="news">新闻</option>
+          <option value="video">视频</option>
+        </select>
+        <button id="go" type="submit">搜索</button>
+      </form>
+      <ul id="results"></ul>
+    </main>
+    <script>
+      (function () {
+        const form = document.getElementById('searchForm');
+        const q = document.getElementById('q');
+        const results = document.getElementById('results');
+
+        function runSearch() {
+          const query = (q.value || '').trim();
+          results.innerHTML = '';
+          if (!query) return;
+          for (let i = 1; i <= 3; i++) {
+            const li = document.createElement('li');
+            li.textContent = '结果' + i + ': ' + query + ' 的相关内容';
+            results.appendChild(li);
+          }
+        }
+
+        form.addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          runSearch();
+        });
+
+        q.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            runSearch();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

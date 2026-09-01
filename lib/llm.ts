@@ -96,3 +96,37 @@ export async function streamChat(
     }
   }
 }
+
+/**
+ * 非流式聊天：与 streamChat 同源，但请求一次拿完整响应，返回 choices[0].message.content。
+ * Agent 循环用它来做多轮动作 JSON 生成。
+ */
+export async function chat(
+  settings: LLMSettings,
+  messages: OutgoingMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
+  const baseUrl = settings.baseUrl.replace(/\/+$/, '');
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${settings.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: settings.model,
+      messages,
+      stream: false,
+    }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const text = (await res.text()).slice(0, 300);
+    throw new Error(`LLM 请求失败 (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+  const content = data?.choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content : '';
+}

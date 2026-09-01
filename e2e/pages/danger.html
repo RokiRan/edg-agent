@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>确认订单</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      form { display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+      input { font: inherit; padding: 4px 8px; }
+      button { font: inherit; padding: 6px 12px; cursor: pointer; }
+      #submitted { margin-top: 16px; color: #16a34a; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>确认订单</h1>
+      <form id="orderForm">
+        <input id="name" type="text" placeholder="姓名" autocomplete="off" />
+        <input id="pwd" type="password" placeholder="密码" autocomplete="off" />
+        <button id="pay" type="submit">提交订单</button>
+      </form>
+      <div id="submitted" hidden>订单已提交</div>
+    </main>
+    <script>
+      (function () {
+        const form = document.getElementById('orderForm');
+        const submitted = document.getElementById('submitted');
+
+        form.addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          submitted.hidden = false;
+        });
+      })();
+    </script>
+  </body>
+</html>
