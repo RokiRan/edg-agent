@@ -3,12 +3,9 @@ import {
   domSnapshot,
   showOverlay,
   hideOverlay,
-  actClick,
-  actType,
-  actSelect,
-  actScroll,
-  actClickAt,
-  actTypeFocused,
+  edgAct,
+  cursorShow,
+  type EdgActArgs,
   type PageSnapshot,
   type ElInfo,
 } from './actions';
@@ -114,6 +111,7 @@ async function waitForTabComplete(tabId: number): Promise<void> {
 /** 从模型原始文本中抽出 JSON 主体（去 ```json 围栏）。 */
 function extractJson(raw: string): string | null {
   let s = raw.trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) s = fence[1].trim();
   const start = s.indexOf('{');
@@ -169,6 +167,7 @@ export async function runAgentTask(
     };
   }
   await runInPage<unknown>(tabId, showOverlay, []);
+  await runInPage<unknown>(tabId, cursorShow, []);
 
   const messages: OutgoingMessage[] = [
     { role: 'system', content: buildSystemPrompt() },
@@ -283,7 +282,7 @@ export async function runAgentTask(
 
     if (tool === 'click') {
       const id = typeof action.id === 'number' ? action.id : -1;
-      const res = (await runInPage(tabId, actClick, [id])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage(tabId, edgAct, ['click', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
       // 等可能的跳页
@@ -302,13 +301,13 @@ export async function runAgentTask(
     } else if (tool === 'type') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const text = typeof action.text === 'string' ? action.text : '';
-      const res = (await runInPage(tabId, actType, [id, text])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage(tabId, edgAct, ['type', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'select') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const value = typeof action.value === 'string' ? action.value : '';
-      const res = (await runInPage(tabId, actSelect, [id, value])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage(tabId, edgAct, ['select', { id, value } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'scroll') {
@@ -317,7 +316,7 @@ export async function runAgentTask(
         | 'down'
         | 'top'
         | 'bottom';
-      const res = (await runInPage(tabId, actScroll, [dir])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage(tabId, edgAct, ['scroll', { direction: dir } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'click_at') {
@@ -328,14 +327,14 @@ export async function runAgentTask(
         ok = false;
         info = 'invalid coordinates';
       } else {
-        const res = (await runInPage(tabId, actClickAt, [x, y])) ?? { ok: false, info: 'no result' };
+        const res = (await runInPage(tabId, edgAct, ['click_at', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
         ok = !!res.ok;
         info = res.info;
       }
     } else if (tool === 'type_focused') {
       // 已知取舍：focused 动作无法从快照确定目标文本，跳过高危闸
       const text = typeof action.text === 'string' ? action.text : '';
-      const res = (await runInPage(tabId, actTypeFocused, [text])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage(tabId, edgAct, ['type_focused', { text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'navigate') {

@@ -111,9 +111,15 @@ function decideAction(messages) {
   const allUserText = userMessages.map((m) => msgText(m)).join('\n');
 
   // Scenario priority (mutually exclusive):
+  //   D) 滚动测试 — 触发一次向下滚动。
   //   1) Canvas page ("画布测试页") — supports DOM-id clicks AND multimodal coordinate actions.
   //   2) Order page ("确认订单").
   //   3) Search page ("测试搜索站").
+  const hasScrollTest = allUserText.includes('滚动测试');
+  if (hasScrollTest) {
+    if (results === 0) return { tool: 'scroll', direction: 'down' };
+    return { tool: 'done', summary: '滚动完成' };
+  }
   const hasCanvas = allUserText.includes('画布测试页');
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
