@@ -154,6 +154,13 @@ export async function runAgentTask(
   if (tabId === null) {
     return { status: 'failed', summary: '找不到可操作的标签页' };
   }
+  const targetTab = await chrome.tabs.get(tabId);
+  if (!/^https?:\/\//.test(targetTab.url ?? '')) {
+    return {
+      status: 'failed',
+      summary: '当前页面不支持自动化（chrome://、新建标签页、应用商店等页面不可用），请切换到普通网页后再试',
+    };
+  }
 
   // 首轮：取快照 + 显示 overlay
   let snapshot = await runInPage<PageSnapshot>(tabId, domSnapshot, []);
