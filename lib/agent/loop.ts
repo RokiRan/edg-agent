@@ -76,7 +76,11 @@ let consecutiveFail = 0;
 /** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。 */
 async function runInPage<T>(tabId: number, func: PageFunc, args: unknown[]): Promise<T | null> {
   const inject = async (): Promise<T | null> => {
-    const res = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+    const res = await Promise.race([
+      chrome.scripting.executeScript({ target: { tabId }, func, args }),
+      new Promise<null>((r) => setTimeout(() => r(null), 15000)),
+    ]);
+    if (res === null) throw new Error('页面脚本执行超时（15s）');
     return (res?.[0]?.result as T | undefined) ?? null;
   };
 

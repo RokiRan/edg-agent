@@ -7,7 +7,10 @@
  */
 export async function getTargetTabId(): Promise<number | null> {
   try {
-    const fromBg = await chrome.runtime.sendMessage({ type: 'edg:getTargetTab' });
+    const fromBg = await Promise.race([
+      chrome.runtime.sendMessage({ type: 'edg:getTargetTab' }),
+      new Promise<null>((r) => setTimeout(() => r(null), 3000)),
+    ]);
     const id = fromBg?.tabId;
     if (typeof id === 'number') return id;
   } catch {

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>下拉测试页</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 20px; color: #1f2937; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      .field { position: relative; display: inline-block; }
+      input#person { width: 220px; padding: 6px 10px; font: inherit; border: 1px solid #d1d5db; border-radius: 4px; }
+      #panel {
+        position: absolute;
+        top: 38px;
+        left: 0;
+        min-width: 220px;
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        display: none;
+        z-index: 10;
+      }
+      #panel.open { display: block; }
+      [role="option"] {
+        padding: 6px 12px;
+        cursor: pointer;
+        user-select: none;
+      }
+      [role="option"]:hover { background: #f3f4f6; }
+      #chosen { margin-top: 16px; color: #047857; display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>下拉测试页</h1>
+      <p>请选择一位人员：</p>
+      <div class="field">
+        <input id="person" type="text" placeholder="请选择人员" readonly />
+        <div id="panel" role="listbox">
+          <div role="option" data-value="qinxue">秦雪</div>
+          <div role="option" data-value="liqiang">李强</div>
+          <div role="option" data-value="wangwu">王五</div>
+        </div>
+      </div>
+      <div id="chosen">已选择: <span id="chosenName"></span></div>
+    </main>
+    <script>
+      (function () {
+        const input = document.getElementById('person');
+        const panel = document.getElementById('panel');
+        const options = panel.querySelectorAll('[role="option"]');
+        const chosen = document.getElementById('chosen');
+        const chosenName = document.getElementById('chosenName');
+
+        function openPanel() {
+          panel.classList.add('open');
+        }
+
+        function closePanel() {
+          panel.classList.remove('open');
+        }
+
+        function pick(opt) {
+          const name = opt.textContent || '';
+          input.value = name;
+          chosenName.textContent = name;
+          chosen.style.display = 'block';
+          closePanel();
+        }
+
+        input.addEventListener('click', openPanel);
+        input.addEventListener('focus', openPanel);
+
+        options.forEach((opt) => {
+          opt.addEventListener('click', function () { pick(opt); });
+        });
+
+        document.addEventListener('click', function (ev) {
+          const t = ev.target;
+          if (t === input) return;
+          if (panel.contains(t)) return;
+          closePanel();
+        });
+      })();
+    </script>
+  </body>
+</html>

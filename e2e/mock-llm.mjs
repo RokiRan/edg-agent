@@ -113,8 +113,9 @@ function decideAction(messages) {
   // Scenario priority (mutually exclusive):
   //   D) 滚动测试 — 触发一次向下滚动。
   //   1) Canvas page ("画布测试页") — supports DOM-id clicks AND multimodal coordinate actions.
-  //   2) Order page ("确认订单").
-  //   3) Search page ("测试搜索站").
+  //   2) Dropdown page ("下拉测试页") — ant-design style custom select: click trigger → click option.
+  //   3) Order page ("确认订单").
+  //   4) Search page ("测试搜索站").
   const hasScrollTest = allUserText.includes('滚动测试');
   if (hasScrollTest) {
     if (results === 0) return { tool: 'scroll', direction: 'down' };
@@ -123,6 +124,7 @@ function decideAction(messages) {
   const hasCanvas = allUserText.includes('画布测试页');
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
+  const hasDropdown = allUserText.includes('下拉测试页');
 
   if (hasCanvas) {
     // Short-circuit: if the canvas was already clicked (snapshot shows #clicked).
@@ -142,6 +144,24 @@ function decideAction(messages) {
       return { tool: 'click', id: 98 };
     }
     return { tool: 'done', summary: '已通过坐标点击画布按钮' };
+  }
+
+  // Dropdown scenario: custom (ant-design style) select on 下拉测试页.
+  // Step 0: click the input/ trigger to expand the floating listbox.
+  // Step 1: click the option whose snapshot line carries role=option + text "李强".
+  // Step 2+: done.
+  if (hasDropdown) {
+    if (results === 0) {
+      const m = last.match(/^\[(\d+)\] input[^\n]*placeholder="请选择人员"/m);
+      if (!m) return { tool: 'done', summary: '无法识别的场景' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    if (results === 1) {
+      const m = last.match(/^\[(\d+)\] div role=option[^\n]*"李强"/m);
+      if (!m) return { tool: 'done', summary: '无法识别的场景' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return { tool: 'done', summary: '已选择李强' };
   }
 
   // Order scenario: page contains "确认订单" but not "测试搜索站".

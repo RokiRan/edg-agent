@@ -27,12 +27,17 @@ export function buildSystemPrompt(): string {
     '',
     '操作准则：',
     '- 永远基于最新快照里的元素 id 操作，不要凭记忆使用旧 id。',
-    '- 填写表单字段请用 type；下拉/单选用 select（value 必须等于快照里 options 列出的值之一）。',
-    '- 涉及「支付/付款/购买/删除/移除/发送/发布/提交/下单」等高危动作时，务必先确认要操作的元素是否就是用户意图的那个；不确定就用 ask_user 询问。',
     '- 一次只发一个动作，等待执行结果再决定下一步。',
     '- 当任务已完成、无法继续、或反复失败时，输出 done 并在 summary 中说明情况。',
+    '',
+    '组件库下拉框指引：',
+    '- ant-design、element-plus 等组件库的「下拉选择」不是原生 <select> 标签，而是一个输入框/触发元素 + 一个浮层（div role=listbox） + 一组浮层内的选项（div role=option）。',
+    '- 处理这类下拉：第一步 click 输入框或触发区域，把浮层展开；第二轮快照里会出现 role=option 的元素，再 click 目标选项即可完成选择。',
+    '- select 工具仅用于原生 <select> 标签；若你拿到的是带 placeholder 的输入框、div 或自定义触发器，请改用「click 触发 → click 选项」两步法。',
+    '- 若 select 动作返回 "not a select element"，说明目标是自定义下拉，请改走两步法：先 click 它的输入框/触发器，再 click 浮层里的目标选项。',
   ].join('\n');
 }
+
 
 /**
  * 构造发给 LLM 的快照消息（user 消息 content）。
@@ -46,6 +51,7 @@ export function buildSnapshotMessage(snap: PageSnapshot): string {
 
   for (const el of snap.elements) {
     let line = `[${el.id}] ${el.tag}`;
+    if (el.role && el.role.length > 0) line += ` role=${el.role}`;
     if (el.type) line += ` type=${el.type}`;
     if (el.text && el.text.length > 0) line += ` "${el.text}"`;
     if (el.placeholder) line += ` placeholder="${el.placeholder}"`;

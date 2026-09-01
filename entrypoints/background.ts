@@ -80,7 +80,9 @@ export default defineBackground(() => {
       return { tabId: fallbackAny?.id ?? null };
     };
 
-    resolveAsync().then(sendResponse);
+    resolveAsync()
+      .then(sendResponse)
+      .catch(() => sendResponse({ tabId: null }));
     return true; // 表示异步响应
   });
 });

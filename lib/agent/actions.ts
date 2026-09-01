@@ -28,7 +28,7 @@ export function domSnapshot(): PageSnapshot {
   stale.forEach((n) => n.removeAttribute('data-edg-id'));
 
   const elements: ElInfo[] = [];
-  const candidates = document.querySelectorAll('a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="combobox"], [role="textbox"], [contenteditable=""], [contenteditable="true"], [onclick]');
+  const candidates = document.querySelectorAll('a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="combobox"], [role="textbox"], [role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [contenteditable=""], [contenteditable="true"], [onclick], .ant-select-item-option, .el-select-dropdown__item');
 
   let nextId = 1;
   for (let i = 0; i < candidates.length && elements.length < 150; i++) {
