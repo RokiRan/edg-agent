@@ -2,7 +2,7 @@ import type { LLMProvider, LLMSettings } from './types';
 
 export interface OutgoingMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | unknown[];
 }
 
 export const PROVIDER_PRESETS: Record<LLMProvider, { label: string; baseUrl: string; model: string }> = {

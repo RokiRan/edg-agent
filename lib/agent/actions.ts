@@ -245,3 +245,58 @@ export function actScroll(
     info: `scrolled ${direction} y=${Math.round(window.scrollY)}`,
   };
 }
+
+export function actClickAt(fx: number, fy: number): { ok: boolean; info: string } {
+  const x = Math.round(fx * window.innerWidth);
+  const y = Math.round(fy * window.innerHeight);
+  const el = document.elementFromPoint(x, y);
+  if (!el) return { ok: false, info: 'no element at point' };
+  const trim = (s: string, n: number): string => {
+    const t = (s || '').trim();
+    return t.length > n ? t.slice(0, n) : t;
+  };
+  const tag = el.tagName.toLowerCase();
+  const text = trim((el as HTMLElement).innerText || '', 30);
+  const ev = (type: string) =>
+    new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+    });
+  el.dispatchEvent(ev('pointerdown'));
+  el.dispatchEvent(ev('mousedown'));
+  el.dispatchEvent(ev('mouseup'));
+  el.dispatchEvent(ev('click'));
+  return { ok: true, info: `clicked at (${x},${y}) <${tag}> "${text}"` };
+}
+
+export function actTypeFocused(text: string): { ok: boolean; info: string } {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return { ok: false, info: 'no focused editable element' };
+  const tag = el.tagName.toLowerCase();
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.focus();
+    const proto =
+      el instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) {
+      desc.set.call(el, text);
+    } else {
+      el.value = text;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, info: `typed "${text}" into focused <${tag}>` };
+  }
+  const ceAttr = el.getAttribute('contenteditable');
+  if (ceAttr === '' || ceAttr === 'true') {
+    el.focus();
+    el.innerText = text;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return { ok: true, info: `typed "${text}" into focused contenteditable <${tag}>` };
+  }
+  return { ok: false, info: 'no focused editable element' };
+}

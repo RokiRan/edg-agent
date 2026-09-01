@@ -9,6 +9,36 @@ import http from 'node:http';
 
 const PORT = Number(process.env.MOCK_LLM_PORT ?? 4399);
 const HOST = '127.0.0.1';
+// --- Process-wide counters (exposed via /__stats) ---
+let sawImage = false;
+let reqCount = 0;
+
+// --- Helpers ---
+
+// Normalize an OpenAI-compatible message's content into a plain string.
+// Strings are returned as-is; array form (multimodal) is flattened by joining
+// the `text` fields of each text part. Non-text parts (e.g. image_url) are
+// skipped, but their presence still triggers sawImage.
+function msgText(m) {
+  if (!m || m.content == null) return '';
+  const c = m.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    return c
+      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('\n');
+  }
+  return '';
+}
+
+// True when the message content array carries an image_url part.
+function hasImagePart(m) {
+  return !!m && Array.isArray(m.content) && m.content.some(
+    (p) => p && p.type === 'image_url' && p.image_url && typeof p.image_url.url === 'string'
+  );
+}
+
 
 // --- CORS headers applied to every response ---
 const CORS_HEADERS = {
@@ -69,23 +99,47 @@ function buildOrderReply(lastUserContent, results) {
 function decideAction(messages) {
   const userMessages = Array.isArray(messages) ? messages.filter((m) => m && m.role === 'user') : [];
 
-  // Count "已完成步数" by counting user messages whose content starts with "执行结果:".
+  // Count "已完成步数" by counting user messages whose text content starts with "执行结果:".
+  // msgText flattens array content (multimodal) into a plain string for matching.
   const results = userMessages.filter(
-    (m) => typeof m.content === 'string' && m.content.startsWith('执行结果:')
+    (m) => msgText(m).startsWith('执行结果:')
   ).length;
 
   const lastUser = userMessages[userMessages.length - 1];
-  const last = lastUser && typeof lastUser.content === 'string' ? lastUser.content : '';
+  const last = lastUser ? msgText(lastUser) : '';
 
-  const allUserText = userMessages
-    .map((m) => (typeof m.content === 'string' ? m.content : ''))
-    .join('\n');
+  const allUserText = userMessages.map((m) => msgText(m)).join('\n');
 
-  // Order scenario: page contains "确认订单" but not "测试搜索站".
-  // (search.html / danger.html are mutually exclusive per the spec.)
+  // Scenario priority (mutually exclusive):
+  //   1) Canvas page ("画布测试页") — supports DOM-id clicks AND multimodal coordinate actions.
+  //   2) Order page ("确认订单").
+  //   3) Search page ("测试搜索站").
+  const hasCanvas = allUserText.includes('画布测试页');
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
 
+  if (hasCanvas) {
+    // Short-circuit: if the canvas was already clicked (snapshot shows #clicked).
+    if (last.includes('已点击')) {
+      return { tool: 'done', summary: '已通过坐标点击画布按钮' };
+    }
+    // Multimodal step: the latest user message carries an image_url part — use the
+    // coordinate click action to drive the canvas button at (0.5, 0.4).
+    if (lastUser && hasImagePart(lastUser)) {
+      return { tool: 'click_at', x: 0.5, y: 0.4 };
+    }
+    if (results === 0) {
+      // No DOM elements visible on the canvas page — pretend we have a stub id.
+      return { tool: 'click', id: 99 };
+    }
+    if (results === 1) {
+      return { tool: 'click', id: 98 };
+    }
+    return { tool: 'done', summary: '已通过坐标点击画布按钮' };
+  }
+
+  // Order scenario: page contains "确认订单" but not "测试搜索站".
+  // (search.html / danger.html are mutually exclusive per the spec.)
   if (hasOrder && !hasSearch) {
     return buildOrderReply(last, results);
   }
@@ -165,8 +219,17 @@ const server = http.createServer((req, res) => {
         return;
       }
 
+      // Count every chat completion request, and remember whether we've ever seen
+      // an image_url part (the multimodal fallback path).
+      reqCount += 1;
+      const msgs = body && Array.isArray(body.messages) ? body.messages : [];
+      if (!sawImage && msgs.some(hasImagePart)) {
+        sawImage = true;
+      }
+
       const stream = body && body.stream === true;
-      const action = decideAction(body && body.messages);
+      const action = decideAction(msgs);
+
       const contentString = JSON.stringify(action);
 
       if (stream) {
@@ -187,8 +250,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /__stats — process-wide counters (used by e2e harnesses).
+  if (req.method === 'GET' && url.pathname === '/__stats') {
+    writeJson(res, 200, { reqCount, sawImage });
+    return;
+  }
+
   // Everything else: 404.
   res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...CORS_HEADERS });
+
   res.end('Not Found');
 });
 

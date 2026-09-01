@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>画布测试页</title>
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body { overflow: hidden; background: #f8fafc; }
+      #stage { display: block; }
+      #clicked {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        padding: 6px 10px;
+        background: #16a34a;
+        color: #fff;
+        font: 14px/1.4 system-ui, sans-serif;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <script>
+      (function () {
+        const canvas = document.getElementById('stage');
+        const ctx = canvas.getContext('2d');
+
+        function rect() {
+          return {
+            x: window.innerWidth * 0.5 - 80,
+            y: window.innerHeight * 0.4 - 30,
+            w: 160,
+            h: 60,
+          };
+        }
+
+        function paint() {
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          canvas.width = w;
+          canvas.height = h;
+          canvas.style.width = w + 'px';
+          canvas.style.height = h + 'px';
+
+          ctx.fillStyle = '#f8fafc';
+          ctx.fillRect(0, 0, w, h);
+
+          const r = rect();
+          ctx.fillStyle = '#2563eb';
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '20px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('点我', r.x + r.w / 2, r.y + r.h / 2);
+        }
+
+        paint();
+        window.addEventListener('resize', paint);
+
+        canvas.addEventListener('click', function (ev) {
+          const r = rect();
+          if (
+            ev.clientX >= r.x &&
+            ev.clientX <= r.x + r.w &&
+            ev.clientY >= r.y &&
+            ev.clientY <= r.y + r.h
+          ) {
+            if (!document.getElementById('clicked')) {
+              const div = document.createElement('div');
+              div.id = 'clicked';
+              div.textContent = '已点击 canvas 按钮';
+              document.body.appendChild(div);
+            } else {
+              document.getElementById('clicked').textContent = '已点击 canvas 按钮';
+            }
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

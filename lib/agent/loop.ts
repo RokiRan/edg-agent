@@ -7,6 +7,8 @@ import {
   actType,
   actSelect,
   actScroll,
+  actClickAt,
+  actTypeFocused,
   type PageSnapshot,
   type ElInfo,
 } from './actions';
@@ -57,9 +59,10 @@ function safeHideOverlay(tabId: number): void {
   }
 }
 
-type PageFunc = (...args: unknown[]) => unknown;
-/** runInPage 最近一次失败的真实原因（供上层报错透传）。 */
 let lastPageError: string | null = null;
+
+/** 连续动作失败计数；触发视觉步注入阈值。 */
+let consecutiveFail = 0;
 
 /** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。 */
 async function runInPage<T>(tabId: number, func: PageFunc, args: unknown[]): Promise<T | null> {
@@ -147,6 +150,8 @@ export async function runAgentTask(
   const { onStep, onConfirmRequired, onAskUser, signal } = handlers;
   lastPageError = null;
 
+  consecutiveFail = 0;
+
   let tabId = await getTargetTabId();
   if (tabId === null) {
     return { status: 'failed', summary: '找不到可操作的标签页' };
@@ -180,6 +185,33 @@ export async function runAgentTask(
     if (signal?.aborted) {
       safeHideOverlay(tabId);
       return { status: 'stopped', summary: '用户已中止' };
+    }
+
+    // 视觉兜底：连续失败 >=2 时，先发一张截图提示 LLM 用坐标动作
+    if (consecutiveFail >= 2) {
+      const snapshotText = buildSnapshotMessage(snapshot);
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+          format: 'jpeg',
+          quality: 70,
+        });
+        messages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text:
+                `DOM 操作已连续失败 ${consecutiveFail} 次。附当前页面截图。若元素 id 不可用，请用坐标动作 {"tool":"click_at","x":0到1的小数,"y":0到1的小数}（视口归一化坐标）点击目标，或用 {"tool":"type_focused","text":"..."} 在当前焦点输入。也可以继续用元素 id 动作或 done。\n\n页面信息:\n` +
+                snapshotText,
+            },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        });
+        consecutiveFail = 0;
+      } catch {
+        // captureVisibleTab 失败时跳过视觉步，按原样继续
+      }
     }
 
     let raw: string;
@@ -288,6 +320,24 @@ export async function runAgentTask(
       const res = (await runInPage(tabId, actScroll, [dir])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
+    } else if (tool === 'click_at') {
+      // 已知取舍：坐标动作无法判定目标文本，跳过高危闸
+      const x = typeof action.x === 'number' ? action.x : NaN;
+      const y = typeof action.y === 'number' ? action.y : NaN;
+      if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) {
+        ok = false;
+        info = 'invalid coordinates';
+      } else {
+        const res = (await runInPage(tabId, actClickAt, [x, y])) ?? { ok: false, info: 'no result' };
+        ok = !!res.ok;
+        info = res.info;
+      }
+    } else if (tool === 'type_focused') {
+      // 已知取舍：focused 动作无法从快照确定目标文本，跳过高危闸
+      const text = typeof action.text === 'string' ? action.text : '';
+      const res = (await runInPage(tabId, actTypeFocused, [text])) ?? { ok: false, info: 'no result' };
+      ok = !!res.ok;
+      info = res.info;
     } else if (tool === 'navigate') {
       const url = typeof action.url === 'string' ? action.url : '';
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -341,6 +391,23 @@ export async function runAgentTask(
     } else {
       ok = false;
       info = `unknown tool ${tool}`;
+    }
+
+    // 仅对六个页面动作（click/type/select/scroll/click_at/type_focused）累计连续失败
+    // navigate/new_tab/ask_user/done/unknown 不计入
+    if (
+      tool === 'click' ||
+      tool === 'type' ||
+      tool === 'select' ||
+      tool === 'scroll' ||
+      tool === 'click_at' ||
+      tool === 'type_focused'
+    ) {
+      if (ok) {
+        consecutiveFail = 0;
+      } else {
+        consecutiveFail++;
+      }
     }
 
     onStep({ tool, args: argsForStep, ok, info });
