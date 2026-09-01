@@ -7,6 +7,15 @@
 //   3. Patch manifest.json to add host_permissions: ["<all_urls>"] so that
 //      Puppeteer-driven tests don't have to click through Chrome's native
 //      permission dialog.
+//
+// KNOWN GAP: because host_permissions is pre-granted here, e2e NEVER exercises
+// the runtime chrome.permissions.request flow in lib/agent/loop.ts (runInPage
+// catch → request → retry). That path requires manual verification: load the
+// UNPATCHED .output/chrome-mv3, send a task, click 允许 in the native dialog.
+//
+// BROWSER: e2e must launch Chrome for Testing (~/.cache/puppeteer/chrome/…),
+// NOT branded /Applications/Google Chrome — branded Chrome 137+ removed
+// --load-extension support.
 //   4. Print the absolute path to the prepared extension.
 //
 // Run from project root: `node e2e/prepare-ext.mjs`
