@@ -48,6 +48,7 @@ export function buildSnapshotMessage(snap: PageSnapshot, opts?: { pageText?: boo
   const lines: string[] = [];
   lines.push(`页面: ${snap.title} (${snap.url})`);
   if (opts?.pageText) lines.push(`正文摘录: ${snap.pageText}`);
+  if (snap.contextText) lines.push(`最近操作区域: ${snap.contextText}`);
   lines.push('可交互元素:');
 
   for (const el of snap.elements) {

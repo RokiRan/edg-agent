@@ -16,6 +16,8 @@ export interface PageSnapshot {
   title: string;
   elements: ElInfo[];
   pageText: string;
+  /** 最近操作元素的邻近文本（无操作时为空串）。 */
+  contextText: string;
 }
 
 export function domSnapshot(): PageSnapshot {
@@ -111,12 +113,27 @@ export function domSnapshot(): PageSnapshot {
     (document.body as HTMLElement | null);
   const rawPageText = main ? main.innerText : '';
   const pageText = trim((rawPageText || '').replace(/\s+/g, ' ').trim(), 2000);
+  // 最近操作区域：以上一次 click/type 目标元素为锚，向上取第一个非空祖先文本。
+  // 让 LLM 能在「正文摘录首轮才有」的条件下确认动作效果（如下拉选中值回显）。
+  const ctxStore = window as unknown as { __edgCtx?: Element };
+  let contextText = '';
+  const ctxEl = ctxStore.__edgCtx;
+  if (ctxEl && ctxEl.isConnected) {
+    let node: Element | null = ctxEl;
+    for (let up = 0; up < 3 && node; up++, node = node.parentElement) {
+      const t = ((node as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+      if (t.length === 0) continue;
+      contextText = trim(t, 300);
+      if (t.length <= 300) break;
+    }
+  }
 
   return {
     url: location.href,
     title: document.title,
     elements,
     pageText,
+    contextText,
   };
 }
 
@@ -548,6 +565,7 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
     const id = typeof args.id === 'number' ? args.id : -1;
     const el = byId(id);
     if (!el) return { ok: false, info: 'element not found' };
+    (window as unknown as { __edgCtx?: Element }).__edgCtx = el;
     const tag = el.tagName.toLowerCase();
     const text = trim(
       (el as HTMLElement).innerText || (el as HTMLInputElement).value || '',
@@ -571,6 +589,7 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
     const y = Math.round(fy * window.innerHeight);
     const el = document.elementFromPoint(x, y);
     if (!el) return { ok: false, info: 'no element at point' };
+    (window as unknown as { __edgCtx?: Element }).__edgCtx = el;
     const tag = el.tagName.toLowerCase();
     await move(st.cur, stateRef, x, y);
     setStatus(st.status, st.cur, '点击');
@@ -583,6 +602,7 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
     const text = typeof args.text === 'string' ? args.text : '';
     const el = byId(id);
     if (!el) return { ok: false, info: 'element not found' };
+    (window as unknown as { __edgCtx?: Element }).__edgCtx = el;
     const tag = el.tagName.toLowerCase();
     const htmlEl = el as HTMLElement;
     if (htmlEl instanceof HTMLSelectElement) {
