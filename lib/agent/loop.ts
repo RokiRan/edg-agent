@@ -44,7 +44,7 @@ export interface AgentResult {
 const DANGEROUS_RE = /(submit|pay|purchase|buy|delete|remove|send|post|publish|order|支付|付款|购买|删除|移除|发送|发布|提交|下单)/i;
 const DANGEROUS_URL_RE = /(checkout|payment|cart|pay)/i;
 
-const MAX_STEPS = 20;
+const DEFAULT_MAX_STEPS = 20;
 const LOAD_POLL_MS = 500;
 const LOAD_TIMEOUT_MS = 8000;
 
@@ -162,6 +162,10 @@ export async function runAgentTask(
   handlers: AgentHandlers,
 ): Promise<AgentResult> {
   const { onStep, onConfirmRequired, onAskUser, signal } = handlers;
+  const rawMax = Number(settings.maxSteps);
+  const maxSteps = Number.isFinite(rawMax)
+    ? Math.min(Math.max(Math.floor(rawMax), 1), 100)
+    : DEFAULT_MAX_STEPS;
   lastPageError = null;
 
   consecutiveFail = 0;
@@ -204,7 +208,7 @@ export async function runAgentTask(
   let lastSummary = '';
   let consecutiveFormatErrors = 0;
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) {
       await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
@@ -504,5 +508,5 @@ export async function runAgentTask(
 
   await safeCdpDetach(tabId);
   safeHideOverlay(tabId);
-  return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${MAX_STEPS}` };
+  return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${maxSteps}` };
 }

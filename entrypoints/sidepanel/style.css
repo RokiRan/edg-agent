@@ -2,10 +2,113 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --edg-bg: #0c0f14;
+  --edg-panel: #12161d;
+  --edg-panel-2: #161b23;
+  --edg-border: #232b36;
+  --edg-text: #e6e9ee;
+  --edg-muted: #8b94a3;
+  --edg-accent: #fbbf24;
+}
+
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
   padding: 0;
+}
+
+body {
+  background: var(--edg-bg);
+  color: var(--edg-text);
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(251, 191, 36, 0.28);
+}
+
+/* slim dark scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3340 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a3340;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* status dot (kept off rounded-full: e2e badge probe depends on that class) */
+.edg-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: currentColor;
+}
+.edg-status-dot--pulse {
+  animation: edg-dot-pulse 1.1s ease-in-out infinite;
+}
+@keyframes edg-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.72);
+  }
+}
+
+/* agent step rows stagger in */
+.edg-step {
+  animation: edg-step-in 0.28s cubic-bezier(0.22, 0.8, 0.32, 1) both;
+}
+@keyframes edg-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* streaming cursor */
+.edg-cursor {
+  animation: edg-blink 0.9s steps(2, start) infinite;
+}
+@keyframes edg-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* empty-state faint grid */
+.edg-grid-bg {
+  background-image:
+    linear-gradient(rgba(140, 150, 165, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140, 150, 165, 0.06) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, black 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, black 30%, transparent 75%);
 }

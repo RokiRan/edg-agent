@@ -9,6 +9,7 @@ type SettingsForm = {
   apiKey: string;
   baseUrl: string;
   model: string;
+  maxSteps: string;
 };
 
 type ConfirmState = {
@@ -25,6 +26,13 @@ type AskState = {
 };
 
 const AGENT_MODE_KEY = 'agent_mode';
+const DEFAULT_MAX_STEPS = 20;
+
+function parseMaxSteps(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_STEPS;
+  return Math.min(Math.max(n, 1), 100);
+}
 
 function hasChromeStorage(): boolean {
   return typeof chrome !== 'undefined' && !!chrome.storage?.local;
@@ -108,6 +116,7 @@ function App() {
     apiKey: '',
     baseUrl: PROVIDER_PRESETS.openai.baseUrl,
     model: PROVIDER_PRESETS.openai.model,
+    maxSteps: String(DEFAULT_MAX_STEPS),
   });
   const [hydrated, setHydrated] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
@@ -128,6 +137,7 @@ function App() {
           apiKey: saved.apiKey,
           baseUrl: saved.baseUrl,
           model: saved.model,
+          maxSteps: String(saved.maxSteps ?? DEFAULT_MAX_STEPS),
         });
       }
       setAgentMode(mode);
@@ -165,8 +175,10 @@ function App() {
       apiKey: settingsForm.apiKey,
       baseUrl: settingsForm.baseUrl,
       model: settingsForm.model,
+      maxSteps: parseMaxSteps(settingsForm.maxSteps),
     };
     await saveSettings(payload);
+    setSettingsForm((prev) => ({ ...prev, maxSteps: String(payload.maxSteps) }));
     setShowSettings(false);
   };
 
@@ -204,6 +216,7 @@ function App() {
         apiKey: settingsForm.apiKey,
         baseUrl: settingsForm.baseUrl,
         model: settingsForm.model,
+        maxSteps: parseMaxSteps(settingsForm.maxSteps),
       };
     })();
 
@@ -368,42 +381,82 @@ function App() {
   };
 
   return (
-    <div className="flex h-full w-full flex-col bg-white text-gray-900">
+    <div className="flex h-full w-full flex-col bg-[#0c0f14] text-[#e6e9ee]">
       {/* Top bar */}
-      <header className="flex shrink-0 items-center justify-between border-b border-gray-200 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-base font-semibold tracking-tight">Edg Agent</h1>
-          <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-700 transition hover:bg-gray-50">
-            <input
-              type="checkbox"
-              checked={agentMode}
-              onChange={(e) => handleAgentModeToggle(e.target.checked)}
-              className="h-3.5 w-3.5 cursor-pointer accent-gray-900"
-              aria-label="切换 Agent 模式"
-            />
-            <span className="font-medium">Agent</span>
-          </label>
+      <header className="flex shrink-0 items-center justify-between border-b border-[#1d232c] bg-[#0e1218] px-3.5 py-2.5">
+        <div className="flex items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-400 shadow-[0_0_14px_rgba(251,191,36,0.35)]">
+            <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+              <path
+                d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"
+                fill="#0c0f14"
+                stroke="#0c0f14"
+                strokeWidth="1"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+          <h1 className="text-[13px] font-semibold tracking-wide">Edg Agent</h1>
         </div>
-        <button
-          type="button"
-          aria-label="设置"
-          onClick={() => setShowSettings((s) => !s)}
-          className="rounded-md p-1.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="h-5 w-5"
+
+        <div className="flex items-center gap-2">
+          {/* mode segmented control */}
+          <div
+            role="group"
+            aria-label="切换 Agent 模式"
+            className="flex items-center rounded-full border border-[#232b36] bg-[#0f131a] p-0.5 text-[11px]"
           >
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
-          </svg>
-        </button>
+            <button
+              type="button"
+              aria-pressed={agentMode}
+              onClick={() => handleAgentModeToggle(true)}
+              className={
+                agentMode
+                  ? 'rounded-full bg-amber-400 px-2.5 py-0.5 font-semibold text-[#0c0f14] transition'
+                  : 'rounded-full px-2.5 py-0.5 font-medium text-[#8b94a3] transition hover:text-[#e6e9ee]'
+              }
+            >
+              Agent
+            </button>
+            <button
+              type="button"
+              aria-pressed={!agentMode}
+              onClick={() => handleAgentModeToggle(false)}
+              className={
+                !agentMode
+                  ? 'rounded-full bg-[#2a3340] px-2.5 py-0.5 font-semibold text-[#e6e9ee] transition'
+                  : 'rounded-full px-2.5 py-0.5 font-medium text-[#8b94a3] transition hover:text-[#e6e9ee]'
+              }
+            >
+              聊天
+            </button>
+          </div>
+
+          <button
+            type="button"
+            aria-label="设置"
+            onClick={() => setShowSettings((s) => !s)}
+            className={
+              showSettings
+                ? 'rounded-md bg-[#232b36] p-1.5 text-amber-400 transition'
+                : 'rounded-md p-1.5 text-[#8b94a3] transition hover:bg-[#1a2028] hover:text-[#e6e9ee]'
+            }
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-[18px] w-[18px]"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       {showSettings ? (
@@ -418,11 +471,25 @@ function App() {
           {/* Message list */}
           <main className="flex-1 overflow-y-auto px-3 py-3">
             {messages.length === 0 && (
-              <div className="flex h-full items-center justify-center px-6 text-center text-sm text-gray-400">
-                开始对话吧，向 Edg Agent 提问。
+              <div className="relative flex h-full items-center justify-center overflow-hidden px-6">
+                <div className="edg-grid-bg absolute inset-0" aria-hidden="true" />
+                <div className="relative text-center">
+                  <div className="font-mono text-[11px] tracking-widest text-amber-400/90">
+                    $ edg --ready
+                    <span className="edg-cursor ml-0.5 inline-block">▍</span>
+                  </div>
+                  <p className="mt-3 text-sm text-[#aab2bf]">
+                    用自然语言指挥当前页面
+                  </p>
+                  <div className="mt-4 flex flex-col gap-1.5 font-mono text-[11px] text-[#5d6675]">
+                    <span>「在搜索框输入 hello 并搜索」</span>
+                    <span>「帮我填写这个表单」</span>
+                    <span>「把页面滚到底部」</span>
+                  </div>
+                </div>
               </div>
             )}
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2.5">
               {messages.map((m) => (
                 <Bubble
                   key={m.id}
@@ -439,21 +506,21 @@ function App() {
           </main>
 
           {/* Input area */}
-          <footer className="shrink-0 border-t border-gray-200 p-3">
+          <footer className="shrink-0 border-t border-[#1d232c] bg-[#0e1218] p-3">
             <div className="flex items-end gap-2">
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 rows={1}
-                placeholder="输入消息，回车发送，Shift+Enter 换行"
-                className="min-h-[40px] max-h-32 flex-1 resize-none rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
+                placeholder={agentMode ? '描述任务…' : '输入消息，Enter 发送'}
+                className="max-h-32 min-h-[40px] flex-1 resize-none rounded-lg border border-[#2a3340] bg-[#11151c] px-3 py-2 text-sm leading-relaxed text-[#e6e9ee] placeholder:text-[#4d5766] focus:border-amber-400/60 focus:outline-none focus:ring-1 focus:ring-amber-400/30"
               />
               {isStreaming ? (
                 <button
                   type="button"
                   onClick={stopStreaming}
-                  className="h-10 shrink-0 rounded-lg border border-gray-300 bg-white px-4 text-sm font-medium text-gray-700 transition hover:bg-gray-100"
+                  className="h-10 shrink-0 rounded-lg border border-red-500/50 bg-red-500/10 px-4 text-sm font-medium text-red-400 transition hover:bg-red-500/20"
                 >
                   停止
                 </button>
@@ -462,11 +529,19 @@ function App() {
                   type="button"
                   onClick={sendMessage}
                   disabled={!input.trim()}
-                  className="h-10 shrink-0 rounded-lg bg-gray-900 px-4 text-sm font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-amber-400 px-4 text-sm font-semibold text-[#0c0f14] transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:bg-[#2a3340] disabled:text-[#5d6675]"
                 >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
+                    <path d="M12 19V5" />
+                    <path d="m5 12 7-7 7 7" />
+                  </svg>
                   发送
                 </button>
               )}
+            </div>
+            <div className="mt-1.5 flex items-center justify-between px-1 font-mono text-[10px] text-[#4d5766]">
+              <span>Enter 发送 · Shift+Enter 换行</span>
+              {agentMode && <span>step limit {parseMaxSteps(settingsForm.maxSteps)}</span>}
             </div>
           </footer>
         </>
@@ -503,12 +578,12 @@ function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResol
       <div
         className={
           isUser
-            ? 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-gray-900 px-3 py-2 text-sm text-white'
-            : 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md bg-gray-100 px-3 py-2 text-sm text-gray-900'
+            ? 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-amber-400 px-3 py-2 text-sm font-medium text-[#0c0f14]'
+            : 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md border border-[#232b36] bg-[#161b23] px-3 py-2 text-sm text-[#e6e9ee]'
         }
       >
         {message.content}
-        {showCursor && <span className="ml-0.5 inline-block animate-pulse text-gray-500">▍</span>}
+        {showCursor && <span className="edg-cursor ml-0.5 inline-block text-amber-400">▍</span>}
       </div>
     </div>
   );
@@ -532,18 +607,31 @@ function AgentBubble({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[92%] rounded-2xl rounded-bl-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900">
+      <div className="max-w-[94%] flex-1 rounded-xl rounded-bl-md border border-[#232b36] bg-[#12161d] px-3 py-2.5 text-sm text-[#e6e9ee]">
+        <div className="mb-2 flex items-center justify-between border-b border-[#1d232c] pb-1.5">
+          <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-[#5d6675]">
+            agent run
+          </span>
+          <StatusBadge status={status} />
+        </div>
+
         {steps.length > 0 && (
           <ol className="mb-2 flex flex-col gap-1">
             {steps.map((step, idx) => (
-              <li key={idx} className="flex items-start gap-2 text-xs leading-relaxed">
-                <span className="font-mono text-gray-400">{idx + 1}.</span>
-                <span className="font-medium text-gray-800">{step.tool}</span>
-                <span className="text-gray-600">{summarizeArgs(step.args, step.tool)}</span>
-                <span className={step.ok ? 'text-green-600' : 'text-red-600'}>
+              <li
+                key={idx}
+                className="edg-step flex items-baseline gap-2 text-xs leading-relaxed"
+                style={{ animationDelay: `${Math.min(idx, 12) * 35}ms` }}
+              >
+                <span className="w-5 shrink-0 text-right font-mono text-[#4d5766]">{idx + 1}.</span>
+                <span className="shrink-0 rounded border border-[#2f3a47] bg-[#181e27] px-1.5 py-px font-mono text-[11px] font-medium text-amber-300/90">
+                  {step.tool}
+                </span>
+                <span className="text-[#aab2bf]">{summarizeArgs(step.args, step.tool)}</span>
+                <span className={step.ok ? 'font-semibold text-[#34d399]' : 'font-semibold text-[#f87171]'}>
                   {step.ok ? '✓' : '✗'}
                 </span>
-                <span className="truncate text-gray-400" title={step.info}>
+                <span className="truncate text-[#5d6675]" title={step.info}>
                   {truncate(step.info, 80)}
                 </span>
               </li>
@@ -551,27 +639,28 @@ function AgentBubble({
           </ol>
         )}
 
-        <div className="flex items-center gap-2 border-t border-gray-200 pt-1.5">
-          <StatusBadge status={status} />
-          {status === 'done' && message.content && (
-            <div className="whitespace-pre-wrap break-words text-sm text-gray-800">{message.content}</div>
-          )}
-          {status === 'failed' && message.content && (
-            <div className="whitespace-pre-wrap break-words text-sm text-red-700">{message.content}</div>
-          )}
-          {status === 'stopped' && (
-            <div className="text-xs text-gray-500">已停止</div>
-          )}
-          {status === 'running' && (
-            <div className="flex items-center gap-1.5 text-xs text-blue-700">
-              <Spinner />
-              <span>运行中…</span>
-            </div>
-          )}
-          {status === 'waiting' && (
-            <div className="text-xs text-yellow-700">等待确认…</div>
-          )}
-        </div>
+        {(status !== 'running' || steps.length === 0) && (
+          <div className="flex items-center gap-2">
+            {status === 'done' && message.content && (
+              <div className="whitespace-pre-wrap break-words text-sm text-[#d6dbe3]">{message.content}</div>
+            )}
+            {status === 'failed' && message.content && (
+              <div className="whitespace-pre-wrap break-words text-sm text-[#f87171]">{message.content}</div>
+            )}
+            {status === 'stopped' && (
+              <div className="text-xs text-[#8b94a3]">已停止</div>
+            )}
+            {status === 'running' && steps.length === 0 && (
+              <div className="flex items-center gap-1.5 text-xs text-[#7ab3f5]">
+                <Spinner />
+                <span>运行中…</span>
+              </div>
+            )}
+            {status === 'waiting' && (
+              <div className="text-xs text-amber-300">等待你的操作…</div>
+            )}
+          </div>
+        )}
 
         {pendingConfirm && (
           <ConfirmCard
@@ -594,23 +683,26 @@ function AgentBubble({
 }
 
 function StatusBadge({ status }: { status: NonNullable<ChatMessage['status']> }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    running: { label: '运行中', cls: 'bg-blue-100 text-blue-700' },
-    waiting: { label: '等待确认', cls: 'bg-yellow-100 text-yellow-800' },
-    done: { label: '完成', cls: 'bg-green-100 text-green-700' },
-    failed: { label: '失败', cls: 'bg-red-100 text-red-700' },
-    stopped: { label: '已停止', cls: 'bg-gray-200 text-gray-700' },
+  const map: Record<string, { label: string; cls: string; pulse: boolean }> = {
+    running: { label: '运行中', cls: 'bg-[#12233a] text-[#7ab3f5]', pulse: true },
+    waiting: { label: '等待确认', cls: 'bg-[#2a2110] text-[#fbbf24]', pulse: true },
+    done: { label: '完成', cls: 'bg-[#0f2a1e] text-[#34d399]', pulse: false },
+    failed: { label: '失败', cls: 'bg-[#2d1414] text-[#f87171]', pulse: false },
+    stopped: { label: '已停止', cls: 'bg-[#1d232c] text-[#8b94a3]', pulse: false },
   };
   const v = map[status] ?? map.done;
   return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${v.cls}`}>{v.label}</span>
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${v.cls}`}>
+      <span className={`edg-status-dot ${v.pulse ? 'edg-status-dot--pulse' : ''}`} aria-hidden="true" />
+      {v.label}
+    </span>
   );
 }
 
 function Spinner() {
   return (
     <svg
-      className="h-3.5 w-3.5 animate-spin text-blue-600"
+      className="h-3.5 w-3.5 animate-spin text-[#7ab3f5]"
       viewBox="0 0 24 24"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
@@ -639,24 +731,31 @@ function ConfirmCard({
   onDeny: () => void;
 }) {
   return (
-    <div className="mt-2 rounded-lg border border-yellow-300 bg-yellow-50 p-3 text-xs text-yellow-900">
-      <div className="mb-1 font-semibold">⚠️ 需要确认</div>
+    <div className="mt-2 rounded-lg border border-amber-500/40 bg-[#1c1608] p-3 text-xs text-amber-200/90">
+      <div className="mb-1 flex items-center gap-1.5 font-semibold text-amber-300">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+          <path d="M12 9v4" />
+          <path d="M12 17h.01" />
+        </svg>
+        需要确认
+      </div>
       <div className="mb-2 leading-relaxed">{reason}</div>
-      <pre className="mb-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-yellow-100 p-2 font-mono text-[11px] text-yellow-900">
+      <pre className="mb-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded border border-amber-500/20 bg-[#0c0f14] p-2 font-mono text-[11px] text-amber-100/80">
         {actionJson}
       </pre>
       <div className="flex justify-end gap-2">
         <button
           type="button"
           onClick={onDeny}
-          className="rounded-md bg-gray-200 px-3 py-1 text-xs font-medium text-gray-800 transition hover:bg-gray-300"
+          className="rounded-md border border-[#3a4452] px-3 py-1 text-xs font-medium text-[#aab2bf] transition hover:bg-[#1d232c]"
         >
           拒绝
         </button>
         <button
           type="button"
           onClick={onAllow}
-          className="rounded-md bg-red-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-red-700"
+          className="rounded-md bg-red-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-red-400"
         >
           允许
         </button>
@@ -668,7 +767,7 @@ function ConfirmCard({
 function AskCard({ question, onSubmit }: { question: string; onSubmit: (answer: string) => void }) {
   const [value, setValue] = useState('');
   return (
-    <div className="mt-2 rounded-lg border border-blue-300 bg-blue-50 p-3 text-xs text-blue-900">
+    <div className="mt-2 rounded-lg border border-[#1e3a5f] bg-[#0d1622] p-3 text-xs text-[#a8c6e8]">
       <div className="mb-2 leading-relaxed">{question}</div>
       <form
         onSubmit={(e) => {
@@ -686,13 +785,13 @@ function AskCard({ question, onSubmit }: { question: string; onSubmit: (answer: 
             if (e.key === 'Enter' && e.nativeEvent.isComposing) e.preventDefault();
           }}
           autoFocus
-          className="min-w-0 flex-1 rounded-md border border-blue-300 bg-white px-2 py-1 text-xs text-blue-900 focus:border-blue-400 focus:outline-none"
+          className="min-w-0 flex-1 rounded-md border border-[#2a4a73] bg-[#0c0f14] px-2 py-1 text-xs text-[#d6e4f5] placeholder:text-[#3d5878] focus:border-[#4a7ab5] focus:outline-none"
           placeholder="输入回答"
         />
         <button
           type="submit"
           disabled={!value.trim()}
-          className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+          className="rounded-md bg-[#2f6fd0] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#3a7de0] disabled:cursor-not-allowed disabled:bg-[#1d3252] disabled:text-[#4d6c94]"
         >
           回答
         </button>
@@ -708,64 +807,97 @@ type SettingsPanelProps = {
   onSave: () => void;
 };
 
+const FIELD_CLS =
+  'rounded-md border border-[#2a3340] bg-[#0f131a] px-2.5 py-1.5 text-sm text-[#e6e9ee] placeholder:text-[#4d5766] focus:border-amber-400/60 focus:outline-none focus:ring-1 focus:ring-amber-400/25';
+const LABEL_CLS =
+  'font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-[#5d6675]';
+
 function SettingsPanel({ form, onChange, onProviderChange, onSave }: SettingsPanelProps) {
   const presetEntries = Object.entries(PROVIDER_PRESETS) as Array<[LLMProvider, { label: string }]>;
 
   return (
     <main className="flex-1 overflow-y-auto px-4 py-4">
       <div className="mx-auto flex w-full max-w-md flex-col gap-4">
-        <h2 className="text-sm font-semibold text-gray-700">LLM 设置</h2>
+        <div>
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
+            llm connection
+          </h2>
+          <div className="mt-3 flex flex-col gap-3.5">
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>Provider</span>
+              <select
+                value={form.provider}
+                onChange={(e) => onProviderChange(e.target.value as LLMProvider)}
+                className={FIELD_CLS}
+              >
+                {presetEntries.map(([key, value]) => (
+                  <option key={key} value={key}>
+                    {value.label}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          <span>Provider</span>
-          <select
-            value={form.provider}
-            onChange={(e) => onProviderChange(e.target.value as LLMProvider)}
-            className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-gray-400 focus:outline-none"
-          >
-            {presetEntries.map(([key, value]) => (
-              <option key={key} value={key}>
-                {value.label}
-              </option>
-            ))}
-          </select>
-        </label>
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>API Key</span>
+              <input
+                type="password"
+                value={form.apiKey}
+                onChange={(e) => onChange({ ...form, apiKey: e.target.value })}
+                autoComplete="off"
+                className={FIELD_CLS}
+              />
+            </label>
 
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          <span>API Key</span>
-          <input
-            type="password"
-            value={form.apiKey}
-            onChange={(e) => onChange({ ...form, apiKey: e.target.value })}
-            autoComplete="off"
-            className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-gray-400 focus:outline-none"
-          />
-        </label>
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>Base URL</span>
+              <input
+                type="text"
+                value={form.baseUrl}
+                onChange={(e) => onChange({ ...form, baseUrl: e.target.value })}
+                className={FIELD_CLS}
+              />
+            </label>
 
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          <span>Base URL</span>
-          <input
-            type="text"
-            value={form.baseUrl}
-            onChange={(e) => onChange({ ...form, baseUrl: e.target.value })}
-            className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-gray-400 focus:outline-none"
-          />
-        </label>
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>Model</span>
+              <input
+                type="text"
+                value={form.model}
+                onChange={(e) => onChange({ ...form, model: e.target.value })}
+                className={FIELD_CLS}
+              />
+            </label>
+          </div>
+        </div>
 
-        <label className="flex flex-col gap-1 text-xs text-gray-600">
-          <span>Model</span>
-          <input
-            type="text"
-            value={form.model}
-            onChange={(e) => onChange({ ...form, model: e.target.value })}
-            className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-gray-400 focus:outline-none"
-          />
-        </label>
+        <div className="border-t border-[#1d232c] pt-4">
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
+            agent
+          </h2>
+          <div className="mt-3 flex flex-col gap-3.5">
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>最大步骤数</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                value={form.maxSteps}
+                onChange={(e) => onChange({ ...form, maxSteps: e.target.value })}
+                className={FIELD_CLS}
+              />
+              <span className="text-[11px] leading-relaxed text-[#5d6675]">
+                Agent 单次任务最多执行的步骤数，1–100，默认 {DEFAULT_MAX_STEPS}。任务复杂时调大，失控时调小。
+              </span>
+            </label>
+          </div>
+        </div>
 
         <button
           type="button"
           onClick={onSave}
-          className="mt-2 self-end rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800"
+          className="mt-1 self-end rounded-lg bg-amber-400 px-5 py-2 text-sm font-semibold text-[#0c0f14] transition hover:bg-amber-300"
         >
           保存
         </button>

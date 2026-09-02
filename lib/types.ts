@@ -5,6 +5,8 @@ export interface LLMSettings {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** Agent 单次任务最大步骤数；缺省由 loop 决定 */
+  maxSteps?: number;
 }
 
 import type { AgentStep } from './agent/loop';
