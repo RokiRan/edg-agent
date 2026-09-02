@@ -54,11 +54,27 @@ export function domSnapshot(): PageSnapshot {
     );
   };
 
+  // 浮层优先（第 0 遍）：点击触发后新出现的下拉/弹窗门户挂在 body 末尾（DOM 序最末），
+  // 在 150 上限下最先被挤出快照（实测 ant.design 级联页表单遍达 160 条、门户项全灭）。
+  // 浮层判定 = popup 角色/类名祖先 + 计算样式 position absolute|fixed，
+  // 排除文档流内的静态菜单（如文档站侧栏 ant-menu）。
+  const inPopup = (el: HTMLElement): boolean => {
+    const c = el.closest(
+      '[role="listbox"], [role="menu"], [role="dialog"], [role="tooltip"], .ant-select-dropdown, .ant-cascader-menus, .el-select-dropdown, .el-popper',
+    );
+    if (!c) return false;
+    const p = window.getComputedStyle(c as HTMLElement).position;
+    return p === 'absolute' || p === 'fixed';
+  };
+
   let nextId = 1;
-  for (let pass = 0; pass < 2 && elements.length < 150; pass++) {
+  const seen = new Set<HTMLElement>();
+  for (let pass = 0; pass < 3 && elements.length < 150; pass++) {
   for (let i = 0; i < candidates.length && elements.length < 150; i++) {
     const el = candidates[i] as HTMLElement;
-    if ((pass === 0) !== isFormControl(el)) continue;
+    if (seen.has(el)) continue;
+    if (pass === 0 && !inPopup(el)) continue;
+    if (pass === 1 && !isFormControl(el)) continue;
     const rects = el.getClientRects();
     if (rects.length === 0) continue;
     const cs = window.getComputedStyle(el);
@@ -103,6 +119,7 @@ export function domSnapshot(): PageSnapshot {
     }
 
     el.setAttribute('data-edg-id', String(nextId));
+    seen.add(el);
     elements.push(info);
     nextId++;
   }
