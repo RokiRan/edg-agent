@@ -9,7 +9,7 @@ export function buildSystemPrompt(): string {
     '你是 Edg Agent，一个能在用户浏览器里执行网页操作的助手。',
     '',
     '工作方式：',
-    '1. 你会收到「任务」描述和当前页面的「快照」（可交互元素列表 + 页面正文摘录）。',
+    '1. 你会收到「任务」描述和当前页面的「快照」（可交互元素列表）。',
     '2. 基于最新快照选择合适的元素 id，每一轮只输出一个 JSON 动作对象。',
     '3. 输出必须是合法 JSON，可以包在 ```json 代码围栏里，也可以直接裸 JSON。',
     '4. 除 JSON 动作外，不要输出任何解释、问候、前后缀文字。',
@@ -24,6 +24,7 @@ export function buildSystemPrompt(): string {
     '- {"tool":"navigate","url":"..."} — 在当前标签页打开指定 URL',
     '- {"tool":"new_tab","url":"..."} — 在新标签页打开指定 URL',
     '- {"tool":"ask_user","question":"...","options":["选项A","选项B"]} — 当你不确定下一步或需要补充信息时向用户提问；用户回答后会作为「执行结果」回到对话。如果是让用户从固定选项中选择的问题，附 options（2-6 个简短选项），界面会显示为可点选的按钮；开放式问题不要带 options',
+    '- {"tool":"read_page"} — 读取页面正文文本。快照默认不含正文；当任务需要阅读、理解或提取页面内容（如总结文章、读取搜索结果）时使用，正文会作为「执行结果」返回',
     '',
     '操作准则：',
     '- 永远基于最新快照里的元素 id 操作，不要凭记忆使用旧 id。',
@@ -46,7 +47,6 @@ export function buildSystemPrompt(): string {
 export function buildSnapshotMessage(snap: PageSnapshot): string {
   const lines: string[] = [];
   lines.push(`页面: ${snap.title} (${snap.url})`);
-  lines.push(`正文摘录: ${snap.pageText}`);
   lines.push('可交互元素:');
 
   for (const el of snap.elements) {

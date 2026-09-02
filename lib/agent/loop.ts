@@ -513,6 +513,18 @@ export async function runAgentTask(
       pruneSnapshots(messages);
       onStep({ tool, args: argsForStep, ok, info });
       continue;
+    } else if (tool === 'read_page') {
+      // 按需读取正文：快照默认不含 pageText，LLM 显式索取时才回传（省 token）
+      snapshot = (await runInPage(tabId, domSnapshot, [])) ?? snapshot;
+      ok = true;
+      info = `页面正文: ${snapshot.pageText || '(无正文)'}`;
+      messages.push({
+        role: 'user',
+        content: `执行结果: ${info}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
+      });
+      pruneSnapshots(messages);
+      onStep({ tool, args: argsForStep, ok, info });
+      continue;
     } else if (tool === 'done') {
       await safeCdpDetach(tabId);
       const summary = typeof action.summary === 'string' ? action.summary : '任务完成';
