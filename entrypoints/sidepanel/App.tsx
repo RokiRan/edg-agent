@@ -345,7 +345,7 @@ function App() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       sendMessage();
     }
@@ -682,6 +682,9 @@ function AskCard({ question, onSubmit }: { question: string; onSubmit: (answer: 
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && e.nativeEvent.isComposing) e.preventDefault();
+          }}
           autoFocus
           className="min-w-0 flex-1 rounded-md border border-blue-300 bg-white px-2 py-1 text-xs text-blue-900 focus:border-blue-400 focus:outline-none"
           placeholder="输入回答"
