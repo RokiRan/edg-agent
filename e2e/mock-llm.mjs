@@ -186,6 +186,18 @@ function decideAction(messages) {
     if (m) return { tool: 'done', summary: `已收到选择: ${m[1]}` };
     return { tool: 'ask_user', question: '请选择处理方式', options: ['选项甲', '选项乙', '选项丙'] };
   }
+  // FormatRecovery scenario: 任务文本含「格式容错」— 首次返回未闭合 think 垃圾
+  // （模拟推理模型被 max_tokens 截断的生产故障形状），触发 loop 的格式错误重试；
+  // 看到重试提示后才返回合法 JSON。断言 agent 不失败、一步恢复。
+  const hasFormatRecovery = allUserText.includes('格式容错');
+  if (hasFormatRecovery) {
+    if (last.includes('格式错误：请只回复')) {
+      return { tool: 'done', summary: '格式重试后完成' };
+    }
+    return {
+      __raw: '<think>The user wants me to output only a single JSON action object. I need to redo my response properly. I was outputti',
+    };
+  }
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');
@@ -320,7 +332,8 @@ const server = http.createServer((req, res) => {
       const stream = body && body.stream === true;
       const action = decideAction(msgs);
 
-      const contentString = JSON.stringify(action);
+      // __raw 场景（如格式容错）直接返回原始文本，不包 JSON
+      const contentString = action && typeof action.__raw === 'string' ? action.__raw : JSON.stringify(action);
 
       if (stream) {
         writeSse(res, contentString);
