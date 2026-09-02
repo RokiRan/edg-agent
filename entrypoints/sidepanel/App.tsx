@@ -707,11 +707,11 @@ function AgentBubble({
                 <span className="shrink-0 rounded border border-[#2f3a47] bg-[#181e27] px-1.5 py-px font-mono text-[11px] font-medium text-amber-300/90">
                   {step.tool}
                 </span>
-                <span className="text-[#aab2bf]">{summarizeArgs(step.args, step.tool)}</span>
+                <span className="min-w-0 flex-1 truncate text-[#aab2bf]" title={summarizeArgs(step.args, step.tool)}>{summarizeArgs(step.args, step.tool)}</span>
                 <span className={step.ok ? 'font-semibold text-[#34d399]' : 'font-semibold text-[#f87171]'}>
                   {step.ok ? '✓' : '✗'}
                 </span>
-                <span className="truncate text-[#5d6675]" title={step.info}>
+                <span className="min-w-0 flex-1 truncate text-[#5d6675]" title={step.info}>
                   {truncate(step.info, 80)}
                 </span>
               </li>

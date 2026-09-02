@@ -130,6 +130,10 @@ export async function chat(
       stream: false,
       // Agent 动作生成要确定性：温度归零，减少同页同快照下动作漂移/死循环
       temperature: 0,
+      // 推理模型（MiniMax M3 等）会在 JSON 前输出 think 段；
+      // provider 默认 max_tokens 可能把响应截断在 think 中途 → 无 JSON 可解析。
+      // 显式给足 think + 动作 JSON 的预算。
+      max_tokens: 2048,
     }),
     signal,
   });

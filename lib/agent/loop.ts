@@ -158,6 +158,8 @@ async function waitForTabComplete(tabId: number): Promise<void> {
 function extractJson(raw: string): string | null {
   let s = raw.trim();
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  // 未闭合 think（推理被 max_tokens 截断时）：其后全是推理内容，整体剥掉
+  s = s.replace(/<think>[\s\S]*$/gi, '').trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) s = fence[1].trim();
   const start = s.indexOf('{');
@@ -294,11 +296,11 @@ export async function runAgentTask(
     if (!json) {
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误，请只回复一个 JSON 动作' });
+      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候或前后缀文字' });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '模型输出格式错误', usage: totalUsage };
+        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}`, usage: totalUsage };
       }
       continue;
     }
@@ -309,11 +311,11 @@ export async function runAgentTask(
     } catch {
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误，请只回复一个 JSON 动作' });
+      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候或前后缀文字' });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '模型输出格式错误', usage: totalUsage };
+        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}`, usage: totalUsage };
       }
       continue;
     }
