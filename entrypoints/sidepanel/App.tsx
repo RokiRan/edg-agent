@@ -193,6 +193,8 @@ function App() {
   const updateAssistant = (id: string, updater: (m: ChatMessage) => ChatMessage) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? updater(m) : m)));
   };
+  // 有 agent 任务处于 running（非等待确认/提问）时，底部悬浮思考球
+  const agentThinking = messages.some((m) => m.kind === 'agent' && m.status === 'running');
 
   const sendMessage = async () => {
     const trimmed = input.trim();
@@ -376,6 +378,9 @@ function App() {
     setPendingConfirm((cur) => {
       if (!cur) return cur;
       cur.resolve(ok);
+      // 解决后任务继续执行，状态从「等待确认」恢复为「运行中」
+      // （否则徽章卡在等待确认直到任务结束，思考球也不会再出现）
+      updateAssistant(cur.messageId, (m) => ({ ...m, status: 'running' }));
       return null;
     });
   };
@@ -388,6 +393,7 @@ function App() {
     setPendingAsk((cur) => {
       if (!cur) return cur;
       cur.resolve(answer);
+      updateAssistant(cur.messageId, (m) => ({ ...m, status: 'running' }));
       return null;
     });
   };
@@ -481,6 +487,7 @@ function App() {
       ) : (
         <>
           {/* Message list */}
+          <div className="relative flex min-h-0 flex-1 flex-col">
           <main className="flex-1 overflow-y-auto px-3 py-3">
             {messages.length === 0 && (
               <div className="relative flex h-full items-center justify-center overflow-hidden px-6">
@@ -517,6 +524,8 @@ function App() {
               <div ref={messagesEndRef} />
             </div>
           </main>
+          <FloatingOrb active={agentThinking} />
+          </div>
 
           {/* Input area */}
           <footer className="shrink-0 border-t border-[#1d232c] bg-[#0e1218] p-3">
@@ -559,6 +568,48 @@ function App() {
           </footer>
         </>
       )}
+    </div>
+  );
+}
+
+/** 底部悬浮思考球：出现播进入动画；思考结束后延迟 1s 再播退出动画。 */
+function FloatingOrb({ active }: { active: boolean }) {
+  const [phase, setPhase] = useState<'off' | 'enter' | 'on' | 'hold' | 'exit'>('off');
+
+  useEffect(() => {
+    if (active) {
+      // 退出/保持中重新激活：退出中→重新进入；保持中→直接回到显示
+      setPhase((p) => (p === 'exit' || p === 'off' ? 'enter' : p === 'hold' ? 'on' : p));
+    } else {
+      setPhase((p) => (p === 'off' ? p : 'hold'));
+    }
+  }, [active]);
+
+  useEffect(() => {
+    if (phase === 'enter') {
+      const t = setTimeout(() => setPhase('on'), 380);
+      return () => clearTimeout(t);
+    }
+    if (phase === 'hold') {
+      const t = setTimeout(() => setPhase('exit'), 1000);
+      return () => clearTimeout(t);
+    }
+    if (phase === 'exit') {
+      const t = setTimeout(() => setPhase('off'), 320);
+      return () => clearTimeout(t);
+    }
+  }, [phase]);
+
+  if (phase === 'off') return null;
+  const animCls = phase === 'enter' ? 'edg-orb-enter' : phase === 'exit' ? 'edg-orb-exit' : '';
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+      <div
+        data-phase={phase}
+        className={`rounded-full border border-[#232b36] bg-[#12161d]/90 p-2 shadow-[0_4px_20px_rgba(0,0,0,0.45)] ${animCls}`}
+      >
+        <ThinkingOrb size={64} />
+      </div>
     </div>
   );
 }
@@ -671,13 +722,6 @@ function AgentBubble({
             )}
           </div>
         )}
-        {status === 'running' && (
-          <div className="edg-thinking flex items-center gap-2 text-xs text-[#7ab3f5]">
-            <ThinkingOrb size={20} />
-            <span>正在思考…</span>
-          </div>
-        )}
-
         {pendingConfirm && (
           <ConfirmCard
             reason={pendingConfirm.reason}
