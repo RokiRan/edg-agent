@@ -235,7 +235,7 @@ export async function runAgentTask(
     { role: 'system', content: buildSystemPrompt() },
     {
       role: 'user',
-      content: `任务: ${task}\n\n${buildSnapshotMessage(snapshot)}`,
+      content: `任务: ${task}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
     },
   ];
 

@@ -9,7 +9,7 @@ export function buildSystemPrompt(): string {
     '你是 Edg Agent，一个能在用户浏览器里执行网页操作的助手。',
     '',
     '工作方式：',
-    '1. 你会收到「任务」描述和当前页面的「快照」（可交互元素列表）。',
+    '1. 你会收到「任务」描述和当前页面的「快照」（可交互元素列表，首轮快照附正文摘录帮你定位）。',
     '2. 基于最新快照选择合适的元素 id，每一轮只输出一个 JSON 动作对象。',
     '3. 输出必须是合法 JSON，可以包在 ```json 代码围栏里，也可以直接裸 JSON。',
     '4. 除 JSON 动作外，不要输出任何解释、问候、前后缀文字。',
@@ -44,9 +44,10 @@ export function buildSystemPrompt(): string {
  * 构造发给 LLM 的快照消息（user 消息 content）。
  * 格式按契约逐字冻结，mock LLM 依赖它解析。
  */
-export function buildSnapshotMessage(snap: PageSnapshot): string {
+export function buildSnapshotMessage(snap: PageSnapshot, opts?: { pageText?: boolean }): string {
   const lines: string[] = [];
   lines.push(`页面: ${snap.title} (${snap.url})`);
+  if (opts?.pageText) lines.push(`正文摘录: ${snap.pageText}`);
   lines.push('可交互元素:');
 
   for (const el of snap.elements) {
