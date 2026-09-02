@@ -91,6 +91,13 @@ function buildOrderReply(lastUserContent, results) {
     return { tool: 'click', id: Number(m[1]) };
   }
 
+  // 第二个高危动作：验证「本次会话始终允许」跳过后续确认
+  if (results === 3) {
+    const m = lastUserContent.match(/^\[(\d+)\] button[^\n]*"删除订单"/m);
+    if (!m) return { tool: 'done', summary: '无法识别的场景' };
+    return { tool: 'click', id: Number(m[1]) };
+  }
+
   return { tool: 'done', summary: '订单已完成' };
 }
 
@@ -143,6 +150,14 @@ function decideAction(messages) {
     return { tool: 'done', summary: '已完成登录表单录入' };
   }
   const hasCanvas = allUserText.includes('画布测试页');
+  // AskOptions scenario: 任务文本含「询问选项」— ask_user 带 options，
+  // 验证选项按钮组 + 确认按钮的交互回路。放在 search 分支之前（用 search.html 做底页）。
+  const hasAskOptions = allUserText.includes('询问选项');
+  if (hasAskOptions) {
+    const m = last.match(/用户回答: ([^\n]+)/);
+    if (m) return { tool: 'done', summary: `已收到选择: ${m[1]}` };
+    return { tool: 'ask_user', question: '请选择处理方式', options: ['选项甲', '选项乙', '选项丙'] };
+  }
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');

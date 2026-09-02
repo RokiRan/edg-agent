@@ -3,6 +3,7 @@ import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
 import { PROVIDER_PRESETS, streamChat, type OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
 import { runAgentTask, type AgentStep } from '../../lib/agent/loop';
+import { ThinkingOrb } from './ThinkingOrb';
 
 type SettingsForm = {
   provider: LLMProvider;
@@ -23,6 +24,7 @@ type AskState = {
   messageId: string;
   resolve: (answer: string) => void;
   question: string;
+  options?: string[];
 };
 
 const AGENT_MODE_KEY = 'agent_mode';
@@ -124,6 +126,8 @@ function App() {
   const [pendingAsk, setPendingAsk] = useState<AskState | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  // 「本次会话始终允许」：仅内存态，侧栏重开即失效
+  const alwaysAllowRiskRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -252,8 +256,10 @@ function App() {
               steps: [...(m.steps ?? []), step],
             }));
           },
-          onConfirmRequired: (req) =>
-            new Promise<boolean>((resolve) => {
+          onConfirmRequired: (req) => {
+            // 本次会话始终允许：跳过人肉确认
+            if (alwaysAllowRiskRef.current) return Promise.resolve(true);
+            return new Promise<boolean>((resolve) => {
               setPendingConfirm({
                 messageId: assistantId,
                 resolve,
@@ -261,13 +267,15 @@ function App() {
                 actionJson: req.actionJson,
               });
               updateAssistant(assistantId, (m) => ({ ...m, status: 'waiting' }));
-            }),
-          onAskUser: (question) =>
+            });
+          },
+          onAskUser: (question, options) =>
             new Promise<string>((resolve) => {
               setPendingAsk({
                 messageId: assistantId,
                 resolve,
                 question,
+                options,
               });
               updateAssistant(assistantId, (m) => ({ ...m, status: 'waiting' }));
             }),
@@ -370,6 +378,10 @@ function App() {
       cur.resolve(ok);
       return null;
     });
+  };
+  const handleConfirmAlways = () => {
+    alwaysAllowRiskRef.current = true;
+    handleConfirmResolve(true);
   };
 
   const handleAskResolve = (answer: string) => {
@@ -498,6 +510,7 @@ function App() {
                   pendingConfirm={pendingConfirm?.messageId === m.id ? pendingConfirm : null}
                   pendingAsk={pendingAsk?.messageId === m.id ? pendingAsk : null}
                   onConfirmResolve={handleConfirmResolve}
+                  onConfirmAlways={handleConfirmAlways}
                   onAskResolve={handleAskResolve}
                 />
               ))}
@@ -556,15 +569,16 @@ type BubbleProps = {
   pendingConfirm: ConfirmState | null;
   pendingAsk: AskState | null;
   onConfirmResolve: (ok: boolean) => void;
+  onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
 };
 
-function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResolve, onAskResolve }: BubbleProps) {
+function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResolve, onConfirmAlways, onAskResolve }: BubbleProps) {
   const isUser = message.role === 'user';
   const isAgent = message.kind === 'agent';
 
   if (isAgent) {
-    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} onConfirmResolve={onConfirmResolve} onAskResolve={onAskResolve} />;
+    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} onConfirmResolve={onConfirmResolve} onConfirmAlways={onConfirmAlways} onAskResolve={onAskResolve} />;
   }
 
   const showCursor =
@@ -594,12 +608,14 @@ function AgentBubble({
   pendingConfirm,
   pendingAsk,
   onConfirmResolve,
+  onConfirmAlways,
   onAskResolve,
 }: {
   message: ChatMessage;
   pendingConfirm: ConfirmState | null;
   pendingAsk: AskState | null;
   onConfirmResolve: (ok: boolean) => void;
+  onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
 }) {
   const steps = message.steps ?? [];
@@ -639,7 +655,7 @@ function AgentBubble({
           </ol>
         )}
 
-        {(status !== 'running' || steps.length === 0) && (
+        {(status !== 'running') && (
           <div className="flex items-center gap-2">
             {status === 'done' && message.content && (
               <div className="whitespace-pre-wrap break-words text-sm text-[#d6dbe3]">{message.content}</div>
@@ -650,15 +666,15 @@ function AgentBubble({
             {status === 'stopped' && (
               <div className="text-xs text-[#8b94a3]">已停止</div>
             )}
-            {status === 'running' && steps.length === 0 && (
-              <div className="flex items-center gap-1.5 text-xs text-[#7ab3f5]">
-                <Spinner />
-                <span>运行中…</span>
-              </div>
-            )}
             {status === 'waiting' && (
               <div className="text-xs text-amber-300">等待你的操作…</div>
             )}
+          </div>
+        )}
+        {status === 'running' && (
+          <div className="edg-thinking flex items-center gap-2 text-xs text-[#7ab3f5]">
+            <ThinkingOrb size={20} />
+            <span>正在思考…</span>
           </div>
         )}
 
@@ -667,6 +683,7 @@ function AgentBubble({
             reason={pendingConfirm.reason}
             actionJson={pendingConfirm.actionJson}
             onAllow={() => onConfirmResolve(true)}
+            onAllowAlways={onConfirmAlways}
             onDeny={() => onConfirmResolve(false)}
           />
         )}
@@ -674,6 +691,7 @@ function AgentBubble({
         {pendingAsk && (
           <AskCard
             question={pendingAsk.question}
+            options={pendingAsk.options}
             onSubmit={(answer) => onAskResolve(answer)}
           />
         )}
@@ -723,11 +741,13 @@ function ConfirmCard({
   reason,
   actionJson,
   onAllow,
+  onAllowAlways,
   onDeny,
 }: {
   reason: string;
   actionJson: string;
   onAllow: () => void;
+  onAllowAlways: () => void;
   onDeny: () => void;
 }) {
   return (
@@ -754,6 +774,13 @@ function ConfirmCard({
         </button>
         <button
           type="button"
+          onClick={onAllowAlways}
+          className="rounded-md border border-amber-500/50 px-3 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-500/10"
+        >
+          本次会话始终允许
+        </button>
+        <button
+          type="button"
           onClick={onAllow}
           className="rounded-md bg-red-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-red-400"
         >
@@ -764,8 +791,50 @@ function ConfirmCard({
   );
 }
 
-function AskCard({ question, onSubmit }: { question: string; onSubmit: (answer: string) => void }) {
+function AskCard({ question, options, onSubmit }: { question: string; options?: string[]; onSubmit: (answer: string) => void }) {
   const [value, setValue] = useState('');
+  const [picked, setPicked] = useState<string | null>(null);
+
+  // 选择类问题：选项以按钮组呈现，选中后点确认提交
+  if (options && options.length > 0) {
+    return (
+      <div className="mt-2 rounded-lg border border-[#1e3a5f] bg-[#0d1622] p-3 text-xs text-[#a8c6e8]">
+        <div className="mb-2 leading-relaxed">{question}</div>
+        <div className="mb-2.5 flex flex-wrap gap-1.5">
+          {options.map((opt) => {
+            const active = picked === opt;
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => setPicked(opt)}
+                className={
+                  active
+                    ? 'rounded-md border border-[#6ea8fe] bg-[#1d3a5f] px-2.5 py-1 text-xs font-medium text-[#cfe3ff]'
+                    : 'rounded-md border border-[#2a4a73] bg-[#0c0f14] px-2.5 py-1 text-xs text-[#a8c6e8] transition hover:border-[#4a7ab5]'
+                }
+              >
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={!picked}
+            onClick={() => {
+              if (picked) onSubmit(picked);
+            }}
+            className="rounded-md bg-[#2f6fd0] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#3a7de0] disabled:cursor-not-allowed disabled:bg-[#1d3252] disabled:text-[#4d6c94]"
+          >
+            确认
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mt-2 rounded-lg border border-[#1e3a5f] bg-[#0d1622] p-3 text-xs text-[#a8c6e8]">
       <div className="mb-2 leading-relaxed">{question}</div>

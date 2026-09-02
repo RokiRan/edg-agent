@@ -31,7 +31,7 @@ export interface ConfirmRequest {
 export interface AgentHandlers {
   onStep: (step: AgentStep) => void;
   onConfirmRequired: (req: ConfirmRequest) => Promise<boolean>;
-  onAskUser: (question: string) => Promise<string>;
+  onAskUser: (question: string, options?: string[]) => Promise<string>;
   signal?: AbortSignal;
 }
 
@@ -455,9 +455,13 @@ export async function runAgentTask(
       }
     } else if (tool === 'ask_user') {
       const question = typeof action.question === 'string' ? action.question : '';
+      const rawOpts = action.options;
+      const options = Array.isArray(rawOpts)
+        ? rawOpts.filter((o): o is string => typeof o === 'string' && o.trim().length > 0).slice(0, 8)
+        : undefined;
       let answer = '';
       try {
-        answer = await onAskUser(question);
+        answer = await onAskUser(question, options && options.length > 0 ? options : undefined);
       } catch {
         answer = '';
       }

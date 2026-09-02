@@ -21,6 +21,8 @@
         <button id="pay" type="submit">提交订单</button>
       </form>
       <div id="submitted" hidden>订单已提交</div>
+      <button id="delete" type="button" style="margin-top: 12px">删除订单</button>
+      <div id="deleted" hidden>订单已删除</div>
     </main>
     <script>
       (function () {
@@ -30,6 +32,9 @@
         form.addEventListener('submit', function (ev) {
           ev.preventDefault();
           submitted.hidden = false;
+        });
+        document.getElementById('delete').addEventListener('click', function () {
+          document.getElementById('deleted').hidden = false;
         });
       })();
     </script>

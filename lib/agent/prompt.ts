@@ -23,7 +23,7 @@ export function buildSystemPrompt(): string {
     '- {"tool":"type_focused","text":"..."} — 在当前焦点元素（input/textarea/contenteditable）中输入文本（仅在收到带截图的消息时使用）',
     '- {"tool":"navigate","url":"..."} — 在当前标签页打开指定 URL',
     '- {"tool":"new_tab","url":"..."} — 在新标签页打开指定 URL',
-    '- {"tool":"ask_user","question":"..."} — 当你不确定下一步或需要补充信息时向用户提问；用户回答后会作为「执行结果」回到对话',
+    '- {"tool":"ask_user","question":"...","options":["选项A","选项B"]} — 当你不确定下一步或需要补充信息时向用户提问；用户回答后会作为「执行结果」回到对话。如果是让用户从固定选项中选择的问题，附 options（2-6 个简短选项），界面会显示为可点选的按钮；开放式问题不要带 options',
     '',
     '操作准则：',
     '- 永远基于最新快照里的元素 id 操作，不要凭记忆使用旧 id。',
