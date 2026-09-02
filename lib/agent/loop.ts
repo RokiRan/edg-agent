@@ -280,7 +280,13 @@ export async function runAgentTask(
 
     let raw: string;
     try {
-      const resp = await chat(settings, messages);
+      // 格式错误后的重试：加大 token 预算兜住推理模型的长 think，
+      // 温度非零打破 temperature:0 下两次重试输出完全相同的死局
+      const isFormatRetry = consecutiveFormatErrors > 0;
+      const resp = await chat(settings, messages, undefined, {
+        maxTokens: isFormatRetry ? 8192 : undefined,
+        temperature: isFormatRetry ? 0.2 : undefined,
+      });
       raw = resp.content;
       if (resp.usage) {
         totalUsage.prompt += resp.usage.prompt;
@@ -296,7 +302,7 @@ export async function runAgentTask(
     if (!json) {
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候或前后缀文字' });
+      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候、前后缀文字或思考过程，直接输出 JSON' });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
@@ -311,7 +317,7 @@ export async function runAgentTask(
     } catch {
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候或前后缀文字' });
+      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候、前后缀文字或思考过程，直接输出 JSON' });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);

@@ -116,6 +116,8 @@ export async function chat(
   settings: LLMSettings,
   messages: OutgoingMessage[],
   signal?: AbortSignal,
+  /** 格式错误重试时的预算升级：更大 max_tokens 兜住长 think，温度非零打破确定性重试 */
+  retryBoost?: { maxTokens?: number; temperature?: number },
 ): Promise<ChatResponse> {
   const baseUrl = settings.baseUrl.replace(/\/+$/, '');
   const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -129,11 +131,11 @@ export async function chat(
       messages,
       stream: false,
       // Agent 动作生成要确定性：温度归零，减少同页同快照下动作漂移/死循环
-      temperature: 0,
+      temperature: retryBoost?.temperature ?? 0,
       // 推理模型（MiniMax M3 等）会在 JSON 前输出 think 段；
       // provider 默认 max_tokens 可能把响应截断在 think 中途 → 无 JSON 可解析。
       // 显式给足 think + 动作 JSON 的预算。
-      max_tokens: 2048,
+      max_tokens: retryBoost?.maxTokens ?? 4096,
     }),
     signal,
   });
