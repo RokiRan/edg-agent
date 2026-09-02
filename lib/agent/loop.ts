@@ -407,6 +407,10 @@ export async function runAgentTask(
       const res = (await runInPage<EdgActResult>(tabId, edgAct, ['select', { id, value } as EdgActArgs])) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
+      if (!ok && /not a select element/i.test(info)) {
+        // 失败点强引导：前置提示词对中档模型不够，在报错处直接给恢复路径
+        info += '（目标不是原生 <select>：这是组件库自定义下拉，请 click 该元素展开浮层，然后从快照顶部浮层选项中 click 目标项，不要再用 select 工具）';
+      }
     } else if (tool === 'scroll') {
       const dir = (typeof action.direction === 'string' ? action.direction : 'down') as
         | 'up'
