@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
-import { PROVIDER_PRESETS, streamChat, type OutgoingMessage } from '../../lib/llm';
+import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
 import { runAgentTask, type AgentStep } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
@@ -107,6 +107,10 @@ function summarizeArgs(args: Record<string, unknown>, tool: string): string {
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
+/** token 数紧凑格式化：1234 → 1.2k。 */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
 
 function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -124,6 +128,8 @@ function App() {
   const [agentMode, setAgentMode] = useState(true);
   const [pendingConfirm, setPendingConfirm] = useState<ConfirmState | null>(null);
   const [pendingAsk, setPendingAsk] = useState<AskState | null>(null);
+  /** 最近一次 agent 任务的 token 用量（footer 显示；新任务开始时清零）。 */
+  const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   // 「本次会话始终允许」：仅内存态，侧栏重开即失效
@@ -248,6 +254,7 @@ function App() {
       };
       setMessages((prev) => [...prev, userMsg, agentMsg]);
       setIsStreaming(true);
+      setLastUsage(null);
 
       try {
         const result = await runAgentTask(trimmed, settings, {
@@ -295,6 +302,7 @@ function App() {
           status: finalStatus,
           content: result.summary,
         }));
+        setLastUsage(result.usage.prompt + result.usage.completion > 0 ? result.usage : null);
       } catch (err) {
         const e = err as { message?: string };
         updateAssistant(assistantId, (m) => ({
@@ -564,6 +572,11 @@ function App() {
             <div className="mt-1.5 flex items-center justify-between px-1 font-mono text-[10px] text-[#4d5766]">
               <span>Enter 发送 · Shift+Enter 换行</span>
               {agentMode && <span>step limit {parseMaxSteps(settingsForm.maxSteps)}</span>}
+              {agentMode && lastUsage && (
+                <span data-testid="token-usage">
+                  ↑{fmtTokens(lastUsage.prompt)} ↓{fmtTokens(lastUsage.completion)}
+                </span>
+              )}
             </div>
           </footer>
         </>

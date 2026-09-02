@@ -4,6 +4,17 @@ export interface OutgoingMessage {
   role: 'system' | 'user' | 'assistant';
   content: string | unknown[];
 }
+/** 单次 LLM 调用的 token 用量（OpenAI 兼容 usage 字段）。 */
+export interface ChatUsage {
+  prompt: number;
+  completion: number;
+}
+
+/** 非流式 chat() 的返回：正文 + 可选用量（provider 不给 usage 时缺省）。 */
+export interface ChatResponse {
+  content: string;
+  usage?: ChatUsage;
+}
 
 export const PROVIDER_PRESETS: Record<LLMProvider, { label: string; baseUrl: string; model: string }> = {
   openai: {
@@ -105,7 +116,7 @@ export async function chat(
   settings: LLMSettings,
   messages: OutgoingMessage[],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<ChatResponse> {
   const baseUrl = settings.baseUrl.replace(/\/+$/, '');
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -126,7 +137,18 @@ export async function chat(
     throw new Error(`LLM 请求失败 (${res.status}): ${text}`);
   }
 
-  const data = (await res.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: unknown } }>;
+    usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+  };
   const content = data?.choices?.[0]?.message?.content;
-  return typeof content === 'string' ? content : '';
+  const prompt = Number(data?.usage?.prompt_tokens);
+  const completion = Number(data?.usage?.completion_tokens);
+  return {
+    content: typeof content === 'string' ? content : '',
+    usage:
+      Number.isFinite(prompt) && Number.isFinite(completion)
+        ? { prompt, completion }
+        : undefined,
+  };
 }

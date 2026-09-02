@@ -1,4 +1,4 @@
-import { chat, type OutgoingMessage } from '../llm';
+import { chat, type ChatUsage, OutgoingMessage } from '../llm';
 import {
   domSnapshot,
   showOverlay,
@@ -38,6 +38,8 @@ export interface AgentHandlers {
 export interface AgentResult {
   status: 'done' | 'stopped' | 'failed' | 'max-steps';
   summary: string;
+  /** 任务全程 LLM token 用量累计（provider 不给 usage 时各字段为 0）。 */
+  usage: ChatUsage;
 }
 
 /** 契约定义的高危关键词正则。 */
@@ -47,6 +49,34 @@ const DANGEROUS_URL_RE = /(checkout|payment|cart|pay)/i;
 const DEFAULT_MAX_STEPS = 20;
 const LOAD_POLL_MS = 500;
 const LOAD_TIMEOUT_MS = 8000;
+/**
+ * 历史快照剪枝：snapshot-bearing user 消息（执行结果: 前缀 + 含 页面: 行）
+ * 只保留最近 2 份完整内容，更早的改写为占位符。
+ * 占位符保留 执行结果: 首行（mock 计数契约）与 页面: 行（场景标记），幂等。
+ * 把 prompt 体积从 O(步数²) 降到 O(步数)。
+ */
+function isSnapshotMessage(m: OutgoingMessage): boolean {
+  return (
+    m.role === 'user' &&
+    typeof m.content === 'string' &&
+    m.content.startsWith('执行结果:') &&
+    m.content.includes('\n页面: ')
+  );
+}
+
+function pruneSnapshots(messages: OutgoingMessage[]): void {
+  const idxs: number[] = [];
+  messages.forEach((m, i) => {
+    if (isSnapshotMessage(m)) idxs.push(i);
+  });
+  for (const i of idxs.slice(0, -2)) {
+    const c = messages[i].content as string;
+    if (c.includes('（更早快照已省略）')) continue;
+    const firstLine = c.slice(0, c.indexOf('\n'));
+    const pageLine = c.match(/\n页面: [^\n]*/)?.[0] ?? '';
+    messages[i] = { role: 'user', content: `${firstLine}${pageLine}\n（更早快照已省略）` };
+  }
+}
 
 /** 安全地清掉页面 overlay（页面可能已经跳转，try/catch 容错）。 */
 function safeHideOverlay(tabId: number): void {
@@ -169,10 +199,11 @@ export async function runAgentTask(
   lastPageError = null;
 
   consecutiveFail = 0;
+  const totalUsage: ChatUsage = { prompt: 0, completion: 0 };
 
   const resolvedTabId = await getTargetTabId();
   if (resolvedTabId === null) {
-    return { status: 'failed', summary: '找不到可操作的标签页' };
+    return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage };
   }
   let tabId: number = resolvedTabId;
   const targetTab = await chrome.tabs.get(tabId);
@@ -180,6 +211,7 @@ export async function runAgentTask(
     return {
       status: 'failed',
       summary: '当前页面不支持自动化（chrome://、新建标签页、应用商店等页面不可用），请切换到普通网页后再试',
+      usage: totalUsage,
     };
   }
 
@@ -193,6 +225,7 @@ export async function runAgentTask(
     return {
       status: 'failed',
       summary: isPerm ? '没有页面访问权限，请点击允许后重试' : `页面操作失败: ${errMsg.slice(0, 200)}`,
+      usage: totalUsage,
     };
   }
   await runInPage<unknown>(tabId, showOverlay, []);
@@ -213,7 +246,7 @@ export async function runAgentTask(
     if (signal?.aborted) {
       await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
-      return { status: 'stopped', summary: '用户已中止' };
+      return { status: 'stopped', summary: '用户已中止', usage: totalUsage };
     }
 
     // 视觉兜底：连续失败 >=2 时，先发一张截图提示 LLM 用坐标动作
@@ -245,12 +278,17 @@ export async function runAgentTask(
 
     let raw: string;
     try {
-      raw = await chat(settings, messages);
+      const resp = await chat(settings, messages);
+      raw = resp.content;
+      if (resp.usage) {
+        totalUsage.prompt += resp.usage.prompt;
+        totalUsage.completion += resp.usage.completion;
+      }
     } catch (err) {
       await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
       const msg = err instanceof Error ? err.message : String(err);
-      return { status: 'failed', summary: `LLM 调用失败: ${msg}` };
+      return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage };
     }
     const json = extractJson(raw);
     if (!json) {
@@ -260,7 +298,7 @@ export async function runAgentTask(
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '模型输出格式错误' };
+        return { status: 'failed', summary: '模型输出格式错误', usage: totalUsage };
       }
       continue;
     }
@@ -275,7 +313,7 @@ export async function runAgentTask(
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '模型输出格式错误' };
+        return { status: 'failed', summary: '模型输出格式错误', usage: totalUsage };
       }
       continue;
     }
@@ -302,7 +340,7 @@ export async function runAgentTask(
         if (!allowed) {
           await safeCdpDetach(tabId);
           safeHideOverlay(tabId);
-          return { status: 'failed', summary: '用户拒绝了高危操作' };
+          return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage };
         }
       }
     }
@@ -472,6 +510,7 @@ export async function runAgentTask(
         role: 'user',
         content: `执行结果: ${info}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
       });
+      pruneSnapshots(messages);
       onStep({ tool, args: argsForStep, ok, info });
       continue;
     } else if (tool === 'done') {
@@ -480,7 +519,7 @@ export async function runAgentTask(
       lastSummary = summary;
       onStep({ tool, args: argsForStep, ok: true, info: summary });
       safeHideOverlay(tabId);
-      return { status: 'done', summary };
+      return { status: 'done', summary, usage: totalUsage };
     } else {
       ok = false;
       info = `unknown tool ${tool}`;
@@ -510,9 +549,10 @@ export async function runAgentTask(
       role: 'user',
       content: `执行结果: ${ok ? info : `失败 - ${info}`}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
     });
+    pruneSnapshots(messages);
   }
 
   await safeCdpDetach(tabId);
   safeHideOverlay(tabId);
-  return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${maxSteps}` };
+  return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${maxSteps}`, usage: totalUsage };
 }

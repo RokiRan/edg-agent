@@ -331,6 +331,11 @@ const server = http.createServer((req, res) => {
               message: { role: 'assistant', content: contentString },
             },
           ],
+          // 估算 token 用量（约 4 字符/token）——供 e2e 验证遥测链路与剪枝收益
+          usage: {
+            prompt_tokens: Math.ceil(raw.length / 4),
+            completion_tokens: Math.ceil(contentString.length / 4),
+          },
         });
       }
     });
