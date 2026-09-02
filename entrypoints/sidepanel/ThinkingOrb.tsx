@@ -44,8 +44,7 @@ export function ThinkingOrb({ size = 20 }: { size?: number }) {
   return (
     <canvas
       ref={canvasRef}
-      role="img"
-      aria-label="正在思考"
+      aria-hidden="true"
       data-state="composing"
       style={{ width: size, height: size }}
     />
