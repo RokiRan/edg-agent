@@ -128,6 +128,8 @@ export async function chat(
       model: settings.model,
       messages,
       stream: false,
+      // Agent 动作生成要确定性：温度归零，减少同页同快照下动作漂移/死循环
+      temperature: 0,
     }),
     signal,
   });
