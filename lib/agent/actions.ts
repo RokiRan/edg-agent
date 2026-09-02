@@ -79,7 +79,7 @@ export function domSnapshot(): PageSnapshot {
     } else {
       rawText = (el as HTMLElement).innerText || ariaLabel || titleAttr || '';
     }
-    const text = trim(rawText, 60);
+    const text = trim(rawText.replace(/\s+/g, ' ').trim(), 60);
 
     const info: ElInfo = {
       id: nextId,

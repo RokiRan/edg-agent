@@ -149,6 +149,34 @@ function decideAction(messages) {
     }
     return { tool: 'done', summary: '已完成登录表单录入' };
   }
+  // Cascader scenarios: 级联React测试页 / 级联Vue测试页 — antd/antdv 的
+  // li[role=menuitemcheckbox] 多列菜单结构：点触发框 → 逐级点列项 → 叶子生效。
+  const hasCascaderReact = allUserText.includes('级联React测试页');
+  const hasCascaderVue = !hasCascaderReact && allUserText.includes('级联Vue测试页');
+  if (hasCascaderReact || hasCascaderVue) {
+    if (process.env.MOCK_DEBUG === '1') {
+      console.error(`[mock-debug] results=${results} last user message:\n${last.slice(0, 3000)}\n---`);
+    }
+    const steps = hasCascaderReact
+      ? ['请选择::input', 'Zhejiang', 'Hangzhou', 'Xihu']
+      : ['请选择::input', '浙江', '杭州', '西湖'];
+    if (results < steps.length) {
+      const target = steps[results];
+      if (target.endsWith('::input')) {
+        const ph = target.slice(0, -'::input'.length);
+        const m = last.match(new RegExp(`^\\[(\\d+)\\] input[^\\n]*placeholder="${ph}"`, 'm'));
+        if (!m) return { tool: 'done', summary: '快照中找不到级联触发框' };
+        return { tool: 'click', id: Number(m[1]) };
+      }
+      const m = last.match(new RegExp(`^\\[(\\d+)\\] li role=menuitemcheckbox[^\\n]*"${target}`, 'm'));
+      if (!m) return { tool: 'done', summary: `快照中找不到级联项 ${target}` };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return {
+      tool: 'done',
+      summary: hasCascaderReact ? '已完成级联选择: Zhejiang / Hangzhou / Xihu' : '已完成级联选择: 浙江 / 杭州 / 西湖',
+    };
+  }
   const hasCanvas = allUserText.includes('画布测试页');
   // AskOptions scenario: 任务文本含「询问选项」— ask_user 带 options，
   // 验证选项按钮组 + 确认按钮的交互回路。放在 search 分支之前（用 search.html 做底页）。

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>级联Vue测试页</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    .ant-select { display: inline-block; width: 280px; border: 1px solid #d9d9d9; border-radius: 6px; padding: 4px 11px; cursor: pointer; }
+    .ant-select-selection-search-input { border: none; outline: none; width: 100%; cursor: pointer; }
+    .ant-select-selection-item { color: #1f2937; }
+    .ant-cascader-dropdown { border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 4px; display: inline-block; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    .ant-cascader-menus { display: flex; }
+    .ant-cascader-menu { list-style: none; margin: 0; padding: 4px; min-width: 120px; border-right: 1px solid #f0f0f0; }
+    .ant-cascader-menu:last-child { border-right: none; }
+    .ant-cascader-menu-item { padding: 5px 12px; cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; gap: 12px; }
+    .ant-cascader-menu-item:hover { background: #f5f5f5; }
+    .ant-cascader-menu-item-expand-icon { color: #9ca3af; }
+    #chosen { margin-top: 16px; color: #16a34a; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>级联Vue测试页</h1>
+  <p>复刻 antdv.com Cascader（Vue） 的 DOM 结构（li[role=menuitemcheckbox] 多列菜单）。</p>
+
+  <div class="ant-select ant-cascader ant-select-single" id="cascader">
+    <div class="ant-select-selector">
+      <span class="ant-select-selection-search">
+        <input class="ant-select-selection-search-input" id="trigger" placeholder="请选择" readonly autocomplete="off" />
+      </span>
+      <span class="ant-select-selection-item" id="selectedValue" hidden></span>
+    </div>
+  </div>
+  <div class="ant-cascader-dropdown" id="dropdown" hidden>
+    <div class="ant-cascader-menus" id="menus"></div>
+  </div>
+  <div id="chosen" hidden></div>
+
+  <script>
+    // antd 经典 demo 数据：Zhejiang / Hangzhou / Xihu
+    const DATA = [
+      { value: '浙江', children: [
+        { value: '杭州', children: [{ value: '西湖' }, { value: '萧山' }] },
+        { value: '宁波', children: [{ value: '海曙' }] },
+      ]},
+      { value: '江苏', children: [
+        { value: '南京', children: [{ value: '中华门' }] },
+      ]},
+    ];
+    const dropdown = document.getElementById('dropdown');
+    const menus = document.getElementById('menus');
+    const path = [];
+
+    function renderColumn(items, level) {
+      const ul = document.createElement('ul');
+      ul.className = 'ant-cascader-menu';
+      for (const item of items) {
+        const li = document.createElement('li');
+        li.className = 'ant-cascader-menu-item' + (item.children ? ' ant-cascader-menu-item-expand' : '');
+        li.setAttribute('role', 'menuitemcheckbox');
+        li.setAttribute('aria-checked', 'false');
+        li.setAttribute('title', item.value);
+        const content = document.createElement('span');
+        content.className = 'ant-cascader-menu-item-content';
+        content.textContent = item.value;
+        li.appendChild(content);
+        if (item.children) {
+          const icon = document.createElement('span');
+          icon.className = 'ant-cascader-menu-item-expand-icon';
+          icon.textContent = '›';
+          li.appendChild(icon);
+        }
+        li.addEventListener('click', () => {
+          path[level] = item.value;
+          path.length = level + 1;
+          while (menus.children.length > level + 1) menus.removeChild(menus.lastChild);
+          if (item.children) {
+            renderColumn(item.children, level + 1);
+          } else {
+            const text = path.join(' / ');
+            const sv = document.getElementById('selectedValue');
+            sv.hidden = false;
+            sv.textContent = text;
+            sv.setAttribute('title', text);
+            document.getElementById('trigger').style.display = 'none';
+            dropdown.hidden = true;
+            const chosen = document.getElementById('chosen');
+            chosen.hidden = false;
+            chosen.textContent = '已选择: ' + text;
+          }
+        });
+        ul.appendChild(li);
+      }
+      menus.appendChild(ul);
+    }
+
+    document.getElementById('cascader').addEventListener('click', () => {
+      if (dropdown.hidden) {
+        menus.innerHTML = '';
+        path.length = 0;
+        renderColumn(DATA, 0);
+        dropdown.hidden = false;
+      } else {
+        dropdown.hidden = true;
+      }
+    });
+  </script>
+</body>
+</html>
