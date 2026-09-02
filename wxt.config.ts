@@ -14,7 +14,7 @@ export default defineConfig({
     },
     permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs', 'debugger'],
     host_permissions: ['<all_urls>'],
-    optional_permissions: ['<all_urls>'],
+    optional_host_permissions: ['<all_urls>'],
     action: {
       default_icon: {
         16: 'icons/icon-16.png',

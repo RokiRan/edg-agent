@@ -115,6 +115,6 @@ export async function cdpWheel(
 // User dismissed the "Chrome is being debugged" infobar or navigated away.
 if (typeof chrome !== 'undefined' && chrome.debugger?.onDetach) {
   chrome.debugger.onDetach.addListener(({ tabId }) => {
-  attached.delete(tabId);
+  if (tabId !== undefined) attached.delete(tabId);
   });
 }

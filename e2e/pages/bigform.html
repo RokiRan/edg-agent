@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>长文档表单测试页</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    #nav a { display: inline-block; margin: 2px 8px 2px 0; font-size: 13px; }
+    form { margin-top: 32px; padding: 16px; border: 1px solid #ddd; width: 320px; }
+    input { display: block; width: 100%; margin-bottom: 12px; padding: 8px; box-sizing: border-box; }
+    button { padding: 8px 24px; }
+    #logged-in { margin-top: 16px; color: green; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>长文档表单测试页</h1>
+  <p>模拟组件库文档页：大量导航链接在表单之前。</p>
+  <div id="nav"></div>
+
+  <form id="login" onsubmit="return false">
+    <input id="username" placeholder="用户名" autocomplete="off" />
+    <input id="password" type="password" placeholder="密码" autocomplete="off" />
+    <button id="login-btn" type="button">登录</button>
+  </form>
+  <div id="logged-in" hidden></div>
+
+  <script>
+    const nav = document.getElementById('nav');
+    for (let i = 1; i <= 220; i++) {
+      const a = document.createElement('a');
+      a.href = '#doc-' + i;
+      a.textContent = '文档链接 ' + i;
+      nav.appendChild(a);
+    }
+    document.getElementById('login-btn').addEventListener('click', () => {
+      const u = document.getElementById('username').value;
+      const p = document.getElementById('password').value;
+      const box = document.getElementById('logged-in');
+      if (u && p) {
+        box.hidden = false;
+        box.textContent = '登录成功: ' + u;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -74,7 +74,7 @@ let lastPageError: string | null = null;
 let consecutiveFail = 0;
 
 /** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。 */
-async function runInPage<T>(tabId: number, func: PageFunc, args: unknown[]): Promise<T | null> {
+async function runInPage<T>(tabId: number, func: (...args: any[]) => unknown, args: unknown[]): Promise<T | null> {
   const inject = async (): Promise<T | null> => {
     const res = await Promise.race([
       chrome.scripting.executeScript({ target: { tabId }, func, args }),
@@ -170,10 +170,11 @@ export async function runAgentTask(
 
   consecutiveFail = 0;
 
-  let tabId = await getTargetTabId();
-  if (tabId === null) {
+  const resolvedTabId = await getTargetTabId();
+  if (resolvedTabId === null) {
     return { status: 'failed', summary: '找不到可操作的标签页' };
   }
+  let tabId: number = resolvedTabId;
   const targetTab = await chrome.tabs.get(tabId);
   if (!/^https?:\/\//.test(targetTab.url ?? '')) {
     return {
@@ -441,6 +442,7 @@ export async function runAgentTask(
         if (chrome.runtime.lastError) return resolve(undefined);
         resolve(t);
       });
+      const created = await promise;
       if (created?.id !== undefined) {
         await safeCdpDetach(tabId);
         tabId = created.id;

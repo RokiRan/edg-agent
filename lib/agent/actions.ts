@@ -1,6 +1,6 @@
 // Self-contained: must NOT import any module. Injected into page via executeScript.
 
-interface ElInfo {
+export interface ElInfo {
   id: number;
   tag: string;
   role: string | null;
@@ -11,7 +11,7 @@ interface ElInfo {
   options?: string[];
 }
 
-interface PageSnapshot {
+export interface PageSnapshot {
   url: string;
   title: string;
   elements: ElInfo[];
@@ -30,9 +30,33 @@ export function domSnapshot(): PageSnapshot {
   const elements: ElInfo[] = [];
   const candidates = document.querySelectorAll('a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="combobox"], [role="textbox"], [role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [contenteditable=""], [contenteditable="true"], [onclick], .ant-select-item-option, .el-select-dropdown__item');
 
+  // 两遍收集：先表单/控件，再链接等其余可交互元素。
+  // 文档很长时（如组件库文档页），150 条上限按 DOM 序会被导航链接耗尽，
+  // 导致页面上的表单根本进不了快照（实测 ant.design 表单 demo 页复现）。
+  const isFormControl = (el: HTMLElement): boolean => {
+    const t = el.tagName.toLowerCase();
+    if (t === 'input' || t === 'select' || t === 'textarea' || t === 'button') return true;
+    const r = el.getAttribute('role');
+    return (
+      r === 'combobox' ||
+      r === 'textbox' ||
+      r === 'searchbox' ||
+      r === 'checkbox' ||
+      r === 'radio' ||
+      r === 'switch' ||
+      r === 'tab' ||
+      r === 'option' ||
+      r === 'menuitem' ||
+      r === 'menuitemcheckbox' ||
+      r === 'menuitemradio'
+    );
+  };
+
   let nextId = 1;
+  for (let pass = 0; pass < 2 && elements.length < 150; pass++) {
   for (let i = 0; i < candidates.length && elements.length < 150; i++) {
     const el = candidates[i] as HTMLElement;
+    if ((pass === 0) !== isFormControl(el)) continue;
     const rects = el.getClientRects();
     if (rects.length === 0) continue;
     const cs = window.getComputedStyle(el);
@@ -79,6 +103,7 @@ export function domSnapshot(): PageSnapshot {
     el.setAttribute('data-edg-id', String(nextId));
     elements.push(info);
     nextId++;
+  }
   }
 
   const main =

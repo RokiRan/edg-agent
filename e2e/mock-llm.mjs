@@ -121,6 +121,27 @@ function decideAction(messages) {
     if (results === 0) return { tool: 'scroll', direction: 'down' };
     return { tool: 'done', summary: '滚动完成' };
   }
+  // Bigform scenario: 长文档表单测试页 — 220 个链接排在登录表单之前，
+  // 验证快照的表单控件优先收集（cap 150 不会把表单挤出快照）。
+  const hasBigform = allUserText.includes('长文档表单测试页');
+  if (hasBigform) {
+    if (results === 0) {
+      const m = last.match(/^\[(\d+)\] input[^\n]*placeholder="用户名"/m);
+      if (!m) return { tool: 'done', summary: '快照中找不到用户名输入框' };
+      return { tool: 'type', id: Number(m[1]), text: 'demo' };
+    }
+    if (results === 1) {
+      const m = last.match(/^\[(\d+)\] input[^\n]*placeholder="密码"/m);
+      if (!m) return { tool: 'done', summary: '快照中找不到密码输入框' };
+      return { tool: 'type', id: Number(m[1]), text: 'secret123' };
+    }
+    if (results === 2) {
+      const m = last.match(/^\[(\d+)\] button[^\n]*"登录"/m);
+      if (!m) return { tool: 'done', summary: '快照中找不到登录按钮' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return { tool: 'done', summary: '已完成登录表单录入' };
+  }
   const hasCanvas = allUserText.includes('画布测试页');
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
