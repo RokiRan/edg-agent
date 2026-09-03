@@ -1,5 +1,98 @@
-node_modules
-.output
-.wxt
-dist
+# ── Node ────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tgz
+.npm/
+.yarn/
+.pnp.*
+
+# 本地私有 npm 镜像 / 安装缓存
+.pnpm-store/
+
+# ── 环境变量 ────────────────────────────────────────────────────────
+# 任何 .env* 都不入仓；需要默认值用 .env.example 占位
+.env
+.env.*
+!.env.example
+
+# ── WXT / 构建产物 ─────────────────────────────────────────────────
+.output/         # wxt build 产物（含 .zip 发行包）
+.wxt/            # wxt 生成的 .wxt/types 和 wxt.d.ts
+dist/
+build/
+out/
+*.tsbuildinfo
+wxt.config.ts.bak
+
+# ── 浏览器扩展运行时 ───────────────────────────────────────────────
+# 加载到浏览器的扩展由 build 产物提供，源码仓库不收
+*.crx
+*.pem
+*.zip
+# 例外：源码里如果未来引入静态资源 zip 可在此加 !pattern
+
+# ── E2E / 测试产物 ─────────────────────────────────────────────────
+/tmp/edg-e2e-ext          # e2e/prepare-ext.mjs 拷贝的临时扩展目录
+coverage/
+.nyc_output/
+*.lcov
+.cache/
+.puppeteer/
+playwright-report/
+test-results/
+junit-*.xml
+
+# ── 日志 ───────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── 编辑器 / IDE ──────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.iml
+*.iws
+*.ipr
+
+# ── 操作系统 ──────────────────────────────────────────────────────
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+$RECYCLE.BIN/
+Desktop.ini
+
+# Linux
+*~
+.fuse_hidden*
+.Trash-*
+
+# ── 杂项 ──────────────────────────────────────────────────────────
+*.local
+.history/
+.tmp/
+.temp/
