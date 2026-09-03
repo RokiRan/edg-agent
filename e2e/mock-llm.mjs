@@ -151,6 +151,36 @@ function decideAction(messages) {
   if (taskLine.includes('慢响应')) {
     return { tool: 'done', summary: '慢响应完成', __delay: 20000 };
   }
+  // Steps-scroll scenario: 任务含「多步测试」— 连续 6 步 scroll 后 done，
+  // 验证 sidepanel 步骤列表限高（约 5 条）滚动且新步骤钉在底部。
+  if (taskLine.includes('多步测试')) {
+    if (results < 6) return { tool: 'scroll', direction: 'down' };
+    return { tool: 'done', summary: '多步完成' };
+  }
+  // Markdown scenario: 任务含「markdown测试」— 首请求直接 done，
+  // summary 为富 markdown，验证 sidepanel 的渲染（标题/列表/链接/行内代码/表格）。
+  if (taskLine.includes('markdown测试')) {
+    return {
+      tool: 'done',
+      summary: [
+        '# 更新一览',
+        '',
+        '根据 [OpenClaw 博客](https://openclaw.ai/blog)，近期更新如下：',
+        '',
+        '## 最新更新',
+        '',
+        '### 1. macOS 新安装器',
+        '- 原生安装器 UI，无需接触终端',
+        '- 自动检测 `Claude` / `Codex` 配置',
+        '- Windows 端 **NVIDIA RTX** 一键部署',
+        '',
+        '| 日期 | 内容 |',
+        '| --- | --- |',
+        '| Sep 3 | 安装器 |',
+        '| Aug 30 | 2.0 大更新 |',
+      ].join('\n'),
+    };
+  }
 
   // Scenario priority (mutually exclusive):
   //   D) 滚动测试 — 触发一次向下滚动。

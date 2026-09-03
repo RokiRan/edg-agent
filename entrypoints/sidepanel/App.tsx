@@ -4,6 +4,7 @@ import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '.
 import { getSettings, saveSettings } from '../../lib/storage';
 import { runAgentTask, type AgentStep, type AgentContinuation, type PriorTurn } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
+import { Markdown } from './Markdown';
 
 type SettingsForm = {
   provider: LLMProvider;
@@ -765,6 +766,7 @@ function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResol
             : 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md border border-[#232b36] bg-[#161b23] px-3 py-2 text-sm text-[#e6e9ee]'
         }
       >
+        {/* 流式分支保持纯文本：半截 token 可能带着未闭合的 ** 或 ```，交给 <Markdown> 会把后续输出全吞进错误节点。 */}
         {message.content}
         {showCursor && <span className="edg-cursor ml-0.5 inline-block text-amber-400">▍</span>}
       </div>
@@ -791,6 +793,12 @@ function AgentBubble({
 }) {
   const steps = message.steps ?? [];
   const status = message.status ?? 'done';
+  // 步骤超过 5 条时列表限高滚动；新步骤流入时钉在底部。
+  const stepsRef = useRef<HTMLOListElement>(null);
+  useEffect(() => {
+    const el = stepsRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [steps.length]);
 
   return (
     <div className="flex justify-start">
@@ -820,7 +828,7 @@ function AgentBubble({
         )}
 
         {steps.length > 0 && (
-          <ol className="mb-2 flex flex-col gap-1">
+          <ol className="mb-2 flex max-h-[120px] flex-col gap-1 overflow-y-auto pr-1" ref={stepsRef}>
             {steps.map((step, idx) => (
               <li
                 key={idx}
@@ -846,10 +854,10 @@ function AgentBubble({
         {(status !== 'running') && (
           <div className="flex items-center gap-2">
             {status === 'done' && message.content && (
-              <div className="whitespace-pre-wrap break-words text-sm text-[#d6dbe3]">{message.content}</div>
+              <Markdown content={message.content} />
             )}
             {status === 'failed' && message.content && (
-              <div className="whitespace-pre-wrap break-words text-sm text-[#f87171]">{message.content}</div>
+              <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm text-[#f87171]">{message.content}</div>
             )}
             {status === 'stopped' && (
               <div className="text-xs text-[#8b94a3]">已停止</div>
@@ -860,7 +868,9 @@ function AgentBubble({
             {status === 'max-steps' && (
               <>
                 {message.content && (
-                  <div className="whitespace-pre-wrap break-words text-sm text-[#fbbf24]">{message.content}</div>
+                  <div className="min-w-0 flex-1 whitespace-pre-wrap text-[#fbbf24]">
+                    <Markdown content={message.content} />
+                  </div>
                 )}
                 <button
                   onClick={() => onContinue(message.id)}
