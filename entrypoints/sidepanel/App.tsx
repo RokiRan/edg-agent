@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
 import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
-import { runAgentTask, type AgentStep, type AgentContinuation } from '../../lib/agent/loop';
+import { runAgentTask, type AgentStep, type AgentContinuation, type PriorTurn } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
 
 type SettingsForm = {
@@ -132,6 +132,10 @@ function App() {
   const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  // 任务进行中的用户补充指令队列：loop 每步开头取出注入对话历史（不打断任务）
+  const steerQueueRef = useRef<string[]>([]);
+  // 当前正在运行的 agent 消息 id：停止按钮乐观 UI 用
+  const currentAgentMsgIdRef = useRef<string | null>(null);
   // max-steps 中断的续跑状态：绑定产生它的 agent 消息，「继续」时在同一消息内接续
   const continuationRef = useRef<{ continuation: AgentContinuation; messageId: string } | null>(null);
   // 「本次会话始终允许」：仅内存态，侧栏重开即失效
@@ -196,6 +200,15 @@ function App() {
 
   const stopStreaming = () => {
     abortRef.current?.abort();
+    // 乐观 UI：立即把运行中的任务标记为已停止，不等 loop 走完清理出口
+    const id = currentAgentMsgIdRef.current;
+    if (id) {
+      updateAssistant(id, (m) =>
+        m.status === 'running' || m.status === 'waiting'
+          ? { ...m, status: 'stopped', content: m.content || '（已停止，正在清理…）' }
+          : m,
+      );
+    }
   };
 
   const updateAssistant = (id: string, updater: (m: ChatMessage) => ChatMessage) => {
@@ -221,15 +234,25 @@ function App() {
     task: string,
     settings: LLMSettings,
     resume?: AgentContinuation,
+    priorTurns?: PriorTurn[],
   ) => {
     const controller = new AbortController();
     abortRef.current = controller;
+    currentAgentMsgIdRef.current = messageId;
     setIsStreaming(true);
     if (!resume) setLastUsage(null);
 
     try {
       const result = await runAgentTask(task, settings, {
         signal: controller.signal,
+        getSteering: () => {
+          const q = steerQueueRef.current;
+          steerQueueRef.current = [];
+          return q;
+        },
+        onTargetTab: (tab) => {
+          updateAssistant(messageId, (m) => ({ ...m, targetTab: tab }));
+        },
         onStep: (step: AgentStep) => {
           updateAssistant(messageId, (m) => ({
             ...m,
@@ -259,7 +282,7 @@ function App() {
             });
             updateAssistant(messageId, (m) => ({ ...m, status: 'waiting' }));
           }),
-      }, { resume });
+      }, { resume, priorTurns });
 
       const finalStatus: ChatMessage['status'] =
         result.status === 'done'
@@ -291,6 +314,9 @@ function App() {
       }));
     } finally {
       abortRef.current = null;
+      currentAgentMsgIdRef.current = null;
+      // 队列绑定本次运行：任务已结束，残留的未消费补充指令不带入下一次任务
+      steerQueueRef.current = [];
       setIsStreaming(false);
       setPendingConfirm((cur) => {
         if (cur && cur.messageId === messageId) {
@@ -320,9 +346,37 @@ function App() {
     void runAgent(messageId, pending.continuation.task, settings, pending.continuation);
   };
 
+  /** 从消息列表折叠出此前已完成的 agent 任务摘要（跨任务上下文连续性；最近 5 条）。 */
+  const buildPriorTurns = (): PriorTurn[] => {
+    const turns: PriorTurn[] = [];
+    for (let i = 0; i < messages.length - 1; i++) {
+      const u = messages[i];
+      const a = messages[i + 1];
+      if (u.role === 'user' && a.kind === 'agent' && a.status === 'done' && a.content) {
+        turns.push({ task: truncate(u.content, 300), summary: truncate(a.content, 1500) });
+      }
+    }
+    return turns.slice(-5);
+  };
+
   const sendMessage = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed) return;
+
+    // 任务进行中：agent 模式下输入作为补充指令注入当前任务（不中断整体任务）；
+    // 纯聊天流式期间仍忽略（streamChat 无插话通道）。
+    if (isStreaming) {
+      if (!agentMode) return;
+      const steerMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: trimmed,
+      };
+      setMessages((prev) => [...prev, steerMsg]);
+      steerQueueRef.current.push(trimmed);
+      setInput('');
+      return;
+    }
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -368,7 +422,7 @@ function App() {
         content: '',
       };
       setMessages((prev) => [...prev, userMsg, agentMsg]);
-      await runAgent(assistantId, trimmed, settings);
+      await runAgent(assistantId, trimmed, settings, undefined, buildPriorTurns());
       return;
     }
 
@@ -588,31 +642,36 @@ function App() {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 rows={1}
-                placeholder={agentMode ? '描述任务…' : '输入消息，Enter 发送'}
+                placeholder={
+                  isStreaming && agentMode
+                    ? '任务进行中：输入补充指令，Enter 注入（不打断任务）'
+                    : agentMode
+                      ? '描述任务…'
+                      : '输入消息，Enter 发送'
+                }
                 className="max-h-32 min-h-[40px] flex-1 resize-none rounded-lg border border-[#2a3340] bg-[#11151c] px-3 py-2 text-sm leading-relaxed text-[#e6e9ee] placeholder:text-[#4d5766] focus:border-amber-400/60 focus:outline-none focus:ring-1 focus:ring-amber-400/30"
               />
-              {isStreaming ? (
+              {isStreaming && (
                 <button
                   type="button"
                   onClick={stopStreaming}
-                  className="h-10 shrink-0 rounded-lg border border-red-500/50 bg-red-500/10 px-4 text-sm font-medium text-red-400 transition hover:bg-red-500/20"
+                  className="h-10 shrink-0 rounded-lg border border-red-500/50 bg-red-500/10 px-3 text-sm font-medium text-red-400 transition hover:bg-red-500/20"
                 >
                   停止
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={sendMessage}
-                  disabled={!input.trim()}
-                  className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-amber-400 px-4 text-sm font-semibold text-[#0c0f14] transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:bg-[#2a3340] disabled:text-[#5d6675]"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
-                    <path d="M12 19V5" />
-                    <path d="m5 12 7-7 7 7" />
-                  </svg>
-                  发送
-                </button>
               )}
+              <button
+                type="button"
+                onClick={sendMessage}
+                disabled={!input.trim() || (isStreaming && !agentMode)}
+                className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-amber-400 px-4 text-sm font-semibold text-[#0c0f14] transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:bg-[#2a3340] disabled:text-[#5d6675]"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
+                  <path d="M12 19V5" />
+                  <path d="m5 12 7-7 7 7" />
+                </svg>
+                {isStreaming ? '补充' : '发送'}
+              </button>
             </div>
             <div className="mt-1.5 flex items-center justify-between px-1 font-mono text-[10px] text-[#4d5766]">
               <span>Enter 发送 · Shift+Enter 换行</span>
@@ -742,6 +801,23 @@ function AgentBubble({
           </span>
           <StatusBadge status={status} />
         </div>
+
+        {message.targetTab && (
+          <div
+            data-testid="target-tab"
+            className="mb-2 flex items-center gap-1.5 rounded border border-[#1d232c] bg-[#0f131a] px-2 py-1 font-mono text-[10px] text-[#8b94a3]"
+          >
+            {message.targetTab.favIconUrl ? (
+              <img src={message.targetTab.favIconUrl} alt="" className="h-3 w-3 shrink-0" />
+            ) : (
+              <span className="h-3 w-3 shrink-0 rounded-full bg-[#2a3340]" aria-hidden="true" />
+            )}
+            <span className="shrink-0 text-[#5d6675]">控制:</span>
+            <span className="min-w-0 truncate" title={message.targetTab.url}>
+              {message.targetTab.title || message.targetTab.url}
+            </span>
+          </div>
+        )}
 
         {steps.length > 0 && (
           <ol className="mb-2 flex flex-col gap-1">

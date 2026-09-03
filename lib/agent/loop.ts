@@ -27,11 +27,28 @@ export interface ConfirmRequest {
   reason: string;
   actionJson: string;
 }
+/** 当前控制的标签页信息（回流 UI 展示用）。 */
+export interface TargetTabInfo {
+  tabId: number;
+  title: string;
+  url: string;
+  favIconUrl?: string;
+}
+
+/** 此前已完成任务的上下文摘要（跨任务连续性：注入后续任务的首条消息）。 */
+export interface PriorTurn {
+  task: string;
+  summary: string;
+}
 
 export interface AgentHandlers {
   onStep: (step: AgentStep) => void;
   onConfirmRequired: (req: ConfirmRequest) => Promise<boolean>;
   onAskUser: (question: string, options?: string[]) => Promise<string>;
+  /** 控制标签页确立/变化/标题更新时上报（任务开始、每步结束、换 tab 后）。 */
+  onTargetTab?: (tab: TargetTabInfo) => void;
+  /** 拉取用户在任务进行中补充的指令队列（取出即清空，注入对话历史）。 */
+  getSteering?: () => string[];
   signal?: AbortSignal;
 }
 
@@ -111,9 +128,35 @@ let lastPageError: string | null = null;
 
 /** 连续动作失败计数；触发视觉步注入阈值。 */
 let consecutiveFail = 0;
+/** 用户中止：统一走 stopped 出口的专用错误（与业务失败区分）。 */
+class AbortedError extends Error {
+  constructor() {
+    super('aborted');
+    this.name = 'AbortedError';
+  }
+}
 
-/** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。 */
-async function runInPage<T>(tabId: number, func: (...args: any[]) => unknown, args: unknown[]): Promise<T | null> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new AbortedError();
+}
+
+/**
+ * 让本身不支持 abort 的异步调用（chrome.* 回调 API、确认/提问等待）
+ * 在 signal 触发时立即 reject——底层调用可能仍在飞，但 loop 不再等它。
+ */
+function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new AbortedError());
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new AbortedError()), { once: true });
+    }),
+  ]);
+}
+
+/** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。signal 中止时立即 reject AbortedError。 */
+async function runInPage<T>(tabId: number, func: (...args: any[]) => unknown, args: unknown[], signal?: AbortSignal): Promise<T | null> {
   const inject = async (): Promise<T | null> => {
     const res = await Promise.race([
       chrome.scripting.executeScript({ target: { tabId }, func, args }),
@@ -123,33 +166,37 @@ async function runInPage<T>(tabId: number, func: (...args: any[]) => unknown, ar
     return (res?.[0]?.result as T | undefined) ?? null;
   };
 
-  try {
-    return await inject();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    lastPageError = msg;
-    if (/Cannot access|permission/i.test(msg)) {
-      const { promise, resolve } = Promise.withResolvers<boolean>();
-      chrome.permissions.request({ origins: ['<all_urls>'] }, (ok) => resolve(!!ok));
-      const granted = await promise;
-      if (granted) {
-        try {
-          return await inject();
-        } catch (retryErr) {
-          lastPageError = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          return null;
+  const run = async (): Promise<T | null> => {
+    try {
+      return await inject();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastPageError = msg;
+      if (/Cannot access|permission/i.test(msg)) {
+        const { promise, resolve } = Promise.withResolvers<boolean>();
+        chrome.permissions.request({ origins: ['<all_urls>'] }, (ok) => resolve(!!ok));
+        const granted = await promise;
+        if (granted) {
+          try {
+            return await inject();
+          } catch (retryErr) {
+            lastPageError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            return null;
+          }
         }
+        lastPageError = '用户未授予页面访问权限';
       }
-      lastPageError = '用户未授予页面访问权限';
+      return null;
     }
-    return null;
-  }
+  };
+  return abortable(run(), signal);
 }
 
-/** 轮询直到 loading 完成（8s 超时）。 */
-async function waitForTabComplete(tabId: number): Promise<void> {
+/** 轮询直到 loading 完成（8s 超时）。signal 中止时立即 reject AbortedError。 */
+async function waitForTabComplete(tabId: number, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + LOAD_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    throwIfAborted(signal);
     const { promise, resolve } = Promise.withResolvers<chrome.tabs.Tab | undefined>();
     chrome.tabs.get(tabId, (t) => {
       if (chrome.runtime.lastError) return resolve(undefined);
@@ -280,9 +327,9 @@ export async function runAgentTask(
   task: string,
   settings: LLMSettings,
   handlers: AgentHandlers,
-  opts?: { resume?: AgentContinuation },
+  opts?: { resume?: AgentContinuation; priorTurns?: PriorTurn[] },
 ): Promise<AgentResult> {
-  const { onStep, onConfirmRequired, onAskUser, signal } = handlers;
+  const { onStep, onConfirmRequired, onAskUser, onTargetTab, getSteering, signal } = handlers;
   const rawMax = Number(settings.maxSteps);
   const maxSteps = Number.isFinite(rawMax)
     ? Math.min(Math.max(Math.floor(rawMax), 1), 100)
@@ -318,8 +365,20 @@ export async function runAgentTask(
     };
   }
 
+  /** 上报当前控制的标签页（标题/URL 会随导航变化，每步结束刷一次）。 */
+  const reportTab = async (): Promise<void> => {
+    if (!onTargetTab) return;
+    try {
+      const t = await chrome.tabs.get(tabId);
+      onTargetTab({ tabId, title: t.title ?? '', url: t.url ?? '', favIconUrl: t.favIconUrl });
+    } catch {
+      // 标签页已关闭——后续步骤会自然失败
+    }
+  };
+  await reportTab();
+
   // 首轮：取快照 + 显示 overlay
-  let snapshot = await runInPage<PageSnapshot>(tabId, domSnapshot, []);
+  let snapshot = await runInPage<PageSnapshot>(tabId, domSnapshot, [], signal);
   if (!snapshot) {
     await safeCdpDetach(tabId);
     safeHideOverlay(tabId);
@@ -331,8 +390,18 @@ export async function runAgentTask(
       usage: totalUsage,
     };
   }
-  await runInPage<unknown>(tabId, showOverlay, []);
-  await runInPage<unknown>(tabId, cursorShow, []);
+  await runInPage<unknown>(tabId, showOverlay, [], signal);
+  await runInPage<unknown>(tabId, cursorShow, [], signal);
+
+  // 跨任务上下文连续性：本会话此前完成的任务摘要注入首条消息
+  // （resume 续跑自带完整历史，不需要）。
+  const priorTurns = resume ? undefined : opts?.priorTurns;
+  const historyNote =
+    priorTurns && priorTurns.length > 0
+      ? `\n\n此前本会话已完成的任务（上下文参考，不要重复执行；如与当前任务相关可复用其结论）:\n${priorTurns
+          .map((t, i) => `${i + 1}. 任务: ${t.task}\n   结果: ${t.summary}`)
+          .join('\n')}`
+      : '';
 
   const messages: OutgoingMessage[] = resume
     ? [
@@ -347,9 +416,24 @@ export async function runAgentTask(
         { role: 'system', content: buildSystemPrompt() },
         {
           role: 'user',
-          content: `任务: ${task}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
+          content: `任务: ${task}${historyNote}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
         },
       ];
+
+  /** 取出并注入用户进行中的补充指令；返回注入条数。 */
+  const drainSteering = (): number => {
+    const steers = getSteering?.() ?? [];
+    for (const text of steers) {
+      messages.push({
+        role: 'user',
+        content: `用户插话: ${text}\n（以上是用户在任务进行中补充的指令。请结合当前页面状态继续推进任务；若与原任务冲突，以最新指令为准。）`,
+      });
+    }
+    if (steers.length > 0) {
+      onStep({ tool: 'steer', args: { text: steers.join(' | ') }, ok: true, info: `已接收 ${steers.length} 条用户补充指令` });
+    }
+    return steers.length;
+  };
 
   let lastSummary = '';
   let consecutiveFormatErrors = 0;
@@ -357,15 +441,15 @@ export async function runAgentTask(
   let lastFinishReason: string | undefined;
 
   for (let step = 0; step < maxSteps; step++) {
-    if (signal?.aborted) {
-      await safeCdpDetach(tabId);
-      safeHideOverlay(tabId);
-      return { status: 'stopped', summary: '用户已中止', usage: totalUsage };
-    }
+    try {
+      throwIfAborted(signal);
+      // 步首吸收用户进行中的补充指令（不打断任务，注入对话历史）
+      drainSteering();
 
     // 视觉兜底：连续失败 >=2 时，先发一张截图提示 LLM 用坐标动作
     if (consecutiveFail >= 2) {
       const snapshotText = buildSnapshotMessage(snapshot);
+      throwIfAborted(signal);
       try {
         const tab = await chrome.tabs.get(tabId);
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
@@ -395,7 +479,7 @@ export async function runAgentTask(
       // 格式错误后的重试：加大 token 预算兜住推理模型的长 think，
       // 温度非零打破 temperature:0 下两次重试输出完全相同的死局
       const isFormatRetry = consecutiveFormatErrors > 0;
-      const resp = await chat(settings, messages, undefined, {
+      const resp = await chat(settings, messages, signal, {
         maxTokens: isFormatRetry ? 8192 : undefined,
         temperature: isFormatRetry ? 0.2 : undefined,
       });
@@ -406,6 +490,8 @@ export async function runAgentTask(
         totalUsage.completion += resp.usage.completion;
       }
     } catch (err) {
+      // 中止触发的 fetch abort 不是业务失败——交给外层 stopped 出口
+      if (err instanceof AbortedError || signal?.aborted) throw err instanceof AbortedError ? err : new AbortedError();
       await safeCdpDetach(tabId);
       safeHideOverlay(tabId);
       const msg = err instanceof Error ? err.message : String(err);
@@ -467,8 +553,9 @@ export async function runAgentTask(
         };
         let allowed = false;
         try {
-          allowed = await onConfirmRequired(req);
-        } catch {
+          allowed = await abortable(onConfirmRequired(req), signal);
+        } catch (err) {
+          if (err instanceof AbortedError) throw err;
           allowed = false;
         }
         if (!allowed) {
@@ -487,18 +574,18 @@ export async function runAgentTask(
 
     if (tool === 'click') {
       const id = typeof action.id === 'number' ? action.id : -1;
-      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_prep', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_prep', { id } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       if (!prep.ok) {
         ok = false;
         info = prep.info ?? 'element not found';
       } else {
         const cdpOk = await cdpClick(tabId, Number(prep.x), Number(prep.y));
         if (cdpOk) {
-          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
           ok = true;
           info = String(prep.info);
         } else {
-          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click', { id } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click', { id } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
           ok = !!r.ok;
           info = r.ok ? `${r.info} (dom)` : r.info;
         }
@@ -514,23 +601,23 @@ export async function runAgentTask(
       });
       const t = await promise;
       if (t?.status === 'loading') {
-        await waitForTabComplete(tabId);
+        await waitForTabComplete(tabId, signal);
       }
     } else if (tool === 'type') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const text = typeof action.text === 'string' ? action.text : '';
-      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['type_prep', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['type_prep', { id, text } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       if (!prep.ok) {
         ok = false;
         info = prep.info ?? 'element not found';
       } else {
         const cdpOk = await cdpInsertText(tabId, text);
         if (cdpOk) {
-          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
           ok = true;
           info = String(prep.info);
         } else {
-          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['type', { id, text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+          const r = (await runInPage<EdgActResult>(tabId, edgAct, ['type', { id, text } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
           ok = !!r.ok;
           info = r.ok ? `${r.info} (dom)` : r.info;
         }
@@ -538,7 +625,7 @@ export async function runAgentTask(
     } else if (tool === 'select') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const value = typeof action.value === 'string' ? action.value : '';
-      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['select', { id, value } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['select', { id, value } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
       if (!ok && /not a select element/i.test(info)) {
@@ -551,7 +638,7 @@ export async function runAgentTask(
         | 'down'
         | 'top'
         | 'bottom';
-      const vs = (await runInPage<EdgActResult>(tabId, edgAct, ['viewport_size', {} as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const vs = (await runInPage<EdgActResult>(tabId, edgAct, ['viewport_size', {} as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       const deltaY = dir === 'down' ? 600 : dir === 'up' ? -600 : 0;
       const canWheel = vs.ok && (dir === 'down' || dir === 'up');
       let wheeled = false;
@@ -561,11 +648,11 @@ export async function runAgentTask(
         wheeled = await cdpWheel(tabId, w / 2, h / 2, deltaY);
       }
       if (wheeled) {
-        await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+        await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
         ok = true;
         info = `scrolled ${dir}`;
       } else {
-        const res = (await runInPage<EdgActResult>(tabId, edgAct, ['scroll', { direction: dir } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+        const res = (await runInPage<EdgActResult>(tabId, edgAct, ['scroll', { direction: dir } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
         ok = !!res.ok;
         info = res.info;
       }
@@ -577,18 +664,18 @@ export async function runAgentTask(
         ok = false;
         info = 'invalid coordinates';
       } else {
-        const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at_prep', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+        const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at_prep', { x, y } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
         if (!prep.ok) {
           ok = false;
           info = prep.info ?? 'no element at point';
         } else {
           const cdpOk = await cdpClick(tabId, Number(prep.x), Number(prep.y));
           if (cdpOk) {
-            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs]);
+            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
             ok = true;
             info = String(prep.info);
           } else {
-            const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at', { x, y } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+            const r = (await runInPage<EdgActResult>(tabId, edgAct, ['click_at', { x, y } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
             ok = !!r.ok;
             info = r.ok ? `${r.info} (dom)` : r.info;
           }
@@ -597,7 +684,7 @@ export async function runAgentTask(
     } else if (tool === 'type_focused') {
       // 已知取舍：focused 动作无法从快照确定目标文本，跳过高危闸
       const text = typeof action.text === 'string' ? action.text : '';
-      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['type_focused', { text } as EdgActArgs])) ?? { ok: false, info: 'no result' };
+      const res = (await runInPage<EdgActResult>(tabId, edgAct, ['type_focused', { text } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
     } else if (tool === 'navigate') {
@@ -608,7 +695,7 @@ export async function runAgentTask(
         resolve();
       });
       await promise;
-      await waitForTabComplete(tabId);
+      await waitForTabComplete(tabId, signal);
       ok = true;
       info = `navigated to ${url}`;
     } else if (tool === 'new_tab') {
@@ -622,7 +709,7 @@ export async function runAgentTask(
       if (created?.id !== undefined) {
         await safeCdpDetach(tabId);
         tabId = created.id;
-        await waitForTabComplete(created.id);
+        await waitForTabComplete(created.id, signal);
         ok = true;
         info = `opened new tab ${created.id} with ${url}`;
       } else {
@@ -637,13 +724,14 @@ export async function runAgentTask(
         : undefined;
       let answer = '';
       try {
-        answer = await onAskUser(question, options && options.length > 0 ? options : undefined);
-      } catch {
+        answer = await abortable(onAskUser(question, options && options.length > 0 ? options : undefined), signal);
+      } catch (err) {
+        if (err instanceof AbortedError) throw err;
         answer = '';
       }
       ok = true;
       info = `用户回答: ${answer}`;
-      snapshot = (await runInPage(tabId, domSnapshot, [])) ?? snapshot;
+      snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
       messages.push({
         role: 'user',
         content: `执行结果: ${info}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
@@ -653,7 +741,7 @@ export async function runAgentTask(
       continue;
     } else if (tool === 'read_page') {
       // 按需读取正文：快照默认不含 pageText，LLM 显式索取时才回传（省 token）
-      snapshot = (await runInPage(tabId, domSnapshot, [])) ?? snapshot;
+      snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
       ok = true;
       info = `页面正文: ${snapshot.pageText || '(无正文)'}`;
       messages.push({
@@ -664,6 +752,13 @@ export async function runAgentTask(
       onStep({ tool, args: argsForStep, ok, info });
       continue;
     } else if (tool === 'done') {
+      // 模型想收尾时若用户刚补充了指令：不结束——新指令可能推翻 done 判断，
+      // 注入后让模型带着补充信息继续推进。
+      if (drainSteering() > 0) {
+        messages.push({ role: 'user', content: '任务尚未结束，请结合上面的用户补充指令继续推进。' });
+        snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
+        continue;
+      }
       await safeCdpDetach(tabId);
       const summary = typeof action.summary === 'string' ? action.summary : '任务完成';
       lastSummary = summary;
@@ -694,12 +789,22 @@ export async function runAgentTask(
 
     onStep({ tool, args: argsForStep, ok, info });
 
-    snapshot = (await runInPage(tabId, domSnapshot, [])) ?? snapshot;
+    snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
     messages.push({
       role: 'user',
       content: `执行结果: ${ok ? info : `失败 - ${info}`}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
     });
     pruneSnapshots(messages);
+      await reportTab();
+    } catch (err) {
+      // 用户中止：步内任意阻塞点（LLM fetch / 页面脚本 / 加载轮询 / 确认等待）立即出口
+      if (err instanceof AbortedError || signal?.aborted) {
+        await safeCdpDetach(tabId);
+        safeHideOverlay(tabId);
+        return { status: 'stopped', summary: '用户已中止', usage: totalUsage };
+      }
+      throw err;
+    }
   }
 
   await safeCdpDetach(tabId);

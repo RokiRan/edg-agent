@@ -12,6 +12,8 @@ const HOST = '127.0.0.1';
 // --- Process-wide counters (exposed via /__stats) ---
 let sawImage = false;
 let reqCount = 0;
+let sawSteer = false;
+let sawHistory = false;
 
 // --- Helpers ---
 
@@ -116,6 +118,39 @@ function decideAction(messages) {
   const last = lastUser ? msgText(lastUser) : '';
 
   const allUserText = userMessages.map((m) => msgText(m)).join('\n');
+
+  // 新场景按「任务行」分流（首条 user 消息里的 任务: 行），不用 allUserText——
+  // 跨任务历史注入（此前本会话已完成的任务）会把旧任务关键词带进新请求，
+  // 用 allUserText 会串场景。
+  const firstUserText = userMessages.length > 0 ? msgText(userMessages[0]) : '';
+  const taskLine = (firstUserText.match(/^任务: ([^\n]+)/m) || [])[1] || '';
+
+  // Steering scenario: 任务含「插话测试」— 先回 scroll 让 loop 保持运行；
+  // 看到「用户插话」消息（loop 步首注入）置 sawSteer 并 done。
+  // 断言：补充指令确实进了对话历史，且任务未被打断（最终正常 done）。
+  if (taskLine.includes('插话测试')) {
+    const steerMsg = userMessages.map((m) => msgText(m)).find((t) => t.includes('用户插话:'));
+    if (steerMsg) {
+      sawSteer = true;
+      const m = steerMsg.match(/用户插话: ([^\n]+)/);
+      return { tool: 'done', summary: `已收到插话: ${m ? m[1] : ''}` };
+    }
+    return { tool: 'scroll', direction: 'down' };
+  }
+  // History scenario: 任务含「历史回顾」— 首条 user 消息应携带
+  // 「此前本会话已完成的任务」历史块（priorTurns 注入）。看到置 sawHistory。
+  if (taskLine.includes('历史回顾')) {
+    if (firstUserText.includes('此前本会话已完成的任务')) {
+      sawHistory = true;
+      return { tool: 'done', summary: '已看到历史' };
+    }
+    return { tool: 'done', summary: '没有看到历史' };
+  }
+  // Slow scenario: 任务含「慢响应」— 延迟 20s 才响应，
+  // 验证停止按钮能立即 abort 进行中的 LLM fetch（不等响应返回）。
+  if (taskLine.includes('慢响应')) {
+    return { tool: 'done', summary: '慢响应完成', __delay: 20000 };
+  }
 
   // Scenario priority (mutually exclusive):
   //   D) 滚动测试 — 触发一次向下滚动。
@@ -293,6 +328,7 @@ function decideAction(messages) {
 // --- Response writers ---
 
 function writeJson(res, status, payload) {
+  if (res.destroyed) return;
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -303,6 +339,7 @@ function writeJson(res, status, payload) {
 }
 
 function writeSse(res, contentString) {
+  if (res.destroyed) return;
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache',
@@ -348,7 +385,7 @@ const server = http.createServer((req, res) => {
     req.on('data', (chunk) => {
       raw += chunk;
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       let body;
       try {
         body = JSON.parse(raw);
@@ -367,6 +404,13 @@ const server = http.createServer((req, res) => {
 
       const stream = body && body.stream === true;
       const action = decideAction(msgs);
+
+      // __delay 场景（慢响应）：先挂起再响应；客户端 abort 后 socket 销毁，
+      // writeJson/writeSse 的 res.destroyed 守卫会让响应静默丢弃。
+      if (action && typeof action.__delay === 'number') {
+        await new Promise((r) => setTimeout(r, action.__delay));
+        if (res.destroyed) return;
+      }
 
       // __raw 场景（如格式容错）直接返回原始文本，不包 JSON
       const contentString = action && typeof action.__raw === 'string' ? action.__raw : JSON.stringify(action);
@@ -396,7 +440,7 @@ const server = http.createServer((req, res) => {
 
   // GET /__stats — process-wide counters (used by e2e harnesses).
   if (req.method === 'GET' && url.pathname === '/__stats') {
-    writeJson(res, 200, { reqCount, sawImage });
+    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory });
     return;
   }
 

@@ -9,7 +9,7 @@ export interface LLMSettings {
   maxSteps?: number;
 }
 
-import type { AgentStep } from './agent/loop';
+import type { AgentStep, TargetTabInfo } from './agent/loop';
 export type { AgentStep };
 
 export interface ChatMessage {
@@ -19,4 +19,6 @@ export interface ChatMessage {
   kind?: 'text' | 'agent';
   steps?: AgentStep[];
   status?: 'running' | 'done' | 'failed' | 'stopped' | 'waiting' | 'max-steps';
+  /** agent 任务当前控制的标签页（运行期间由 loop 实时回流）。 */
+  targetTab?: TargetTabInfo;
 }
