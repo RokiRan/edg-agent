@@ -196,6 +196,56 @@ function extractJson(raw: string): string | null {
   }
   return null;
 }
+/** 单趟反转义 JSON 字符串内容（容忍尾部半个转义——截断场景）。 */
+function unescapeJsonString(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch !== '\\') {
+      out += ch;
+      continue;
+    }
+    const next = s[i + 1];
+    if (next === undefined) break;
+    i++;
+    switch (next) {
+      case 'n': out += '\n'; break;
+      case 't': out += '\t'; break;
+      case 'r': out += '\r'; break;
+      case '"': out += '"'; break;
+      case '\\': out += '\\'; break;
+      case '/': out += '/'; break;
+      case 'u': {
+        const hex = s.slice(i + 1, i + 5);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 4;
+        }
+        break;
+      }
+      default: out += next;
+    }
+  }
+  return out;
+}
+
+/**
+ * 截断抢救：模型在 done.summary 里写长交付时被 max_tokens 截断，
+ * JSON 永不闭合 → extractJson 返回 null。此时把已写出的 summary 内容
+ * 尽力反转义救出，好过整体失败。只在工具是 done 且 summary 有实质内容时生效。
+ */
+function salvageDoneSummary(raw: string): string | null {
+  let s = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  s = s.replace(/<think>[\s\S]*$/gi, '');
+  const start = s.indexOf('{');
+  if (start === -1) return null;
+  const body = s.slice(start);
+  if (!/"tool"\s*:\s*"done"/.test(body)) return null;
+  const m = body.match(/"summary"\s*:\s*"([\s\S]*)$/);
+  if (!m) return null;
+  const inner = unescapeJsonString(m[1]).trim();
+  return inner.length >= 20 ? inner : null;
+}
 
 function dangerReason(
   action: { tool: string; id?: number },
@@ -294,6 +344,8 @@ export async function runAgentTask(
 
   let lastSummary = '';
   let consecutiveFormatErrors = 0;
+  /** 最近一次 chat 的 finish_reason，格式错误终态诊断用 */
+  let lastFinishReason: string | undefined;
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) {
@@ -339,6 +391,7 @@ export async function runAgentTask(
         temperature: isFormatRetry ? 0.2 : undefined,
       });
       raw = resp.content;
+      lastFinishReason = resp.finishReason;
       if (resp.usage) {
         totalUsage.prompt += resp.usage.prompt;
         totalUsage.completion += resp.usage.completion;
@@ -357,7 +410,17 @@ export async function runAgentTask(
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}`, usage: totalUsage };
+        // 长交付被 max_tokens 截断的兜底：done.summary 写了一半断掉时，
+        // 把已写出的内容抢救出来返回给用户，而不是整体失败
+        const salvaged = salvageDoneSummary(raw);
+        if (salvaged) {
+          const summary = `${salvaged}\n\n（模型输出达到长度上限被截断，以上内容可能不完整，可发「继续」让我补全）`;
+          lastSummary = summary;
+          onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
+          return { status: 'done', summary, usage: totalUsage };
+        }
+        const diag = ` [finish_reason=${lastFinishReason ?? '?'}, 输出长度=${raw.length}]`;
+        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}${diag}`, usage: totalUsage };
       }
       continue;
     }
@@ -372,7 +435,8 @@ export async function runAgentTask(
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}`, usage: totalUsage };
+        const diag = ` [finish_reason=${lastFinishReason ?? '?'}, 输出长度=${raw.length}]`;
+        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}${diag}`, usage: totalUsage };
       }
       continue;
     }

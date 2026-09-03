@@ -218,6 +218,15 @@ function decideAction(messages) {
     }
     return { tool: 'scroll', direction: 'down' };
   }
+  // Salvage scenario: 任务文本含「截断交付」— 永远返回写了一半的 done JSON
+  // （summary 字符串未闭合，模拟长交付被 max_tokens 截断）。两次格式错误后
+  // loop 的截断抢救应把已写出的 summary 救回来并标记可能不完整。
+  const hasSalvageTest = allUserText.includes('截断交付');
+  if (hasSalvageTest) {
+    return {
+      __raw: '<think>Let me provide the final done action with the full quiz</think>\n{"tool":"done","summary":"第一题: 什么是 Agent 循环?\\n答案: 感知-决策-执行的迭代。\\n第二题: 为什么需要快照剪枝?\\n答案: 控制上下文长度,防止 （此处输出被长度截断',
+    };
+  }
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');
 

@@ -13,6 +13,8 @@ export interface ChatUsage {
 /** 非流式 chat() 的返回：正文 + 可选用量（provider 不给 usage 时缺省）。 */
 export interface ChatResponse {
   content: string;
+  /** provider 给的停止原因（stop/length 等）；诊断截断用 */
+  finishReason?: string;
   usage?: ChatUsage;
 }
 
@@ -146,14 +148,16 @@ export async function chat(
   }
 
   const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: unknown } }>;
+    choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>;
     usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
   };
   const content = data?.choices?.[0]?.message?.content;
+  const finishReason = data?.choices?.[0]?.finish_reason;
   const prompt = Number(data?.usage?.prompt_tokens);
   const completion = Number(data?.usage?.completion_tokens);
   return {
     content: typeof content === 'string' ? content : '',
+    finishReason: typeof finishReason === 'string' ? finishReason : undefined,
     usage:
       Number.isFinite(prompt) && Number.isFinite(completion)
         ? { prompt, completion }
