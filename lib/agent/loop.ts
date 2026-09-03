@@ -162,10 +162,30 @@ function extractJson(raw: string): string | null {
   s = s.replace(/<think>[\s\S]*$/gi, '').trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) s = fence[1].trim();
+  // 提取第一个配平 JSON 对象（字符串感知：忽略串内引号/括号）。
+  // 不能用 lastIndexOf('}')——模型在 JSON 后追加的正文（如含 } 的 Markdown 试卷正文）
+  // 会把尾随垃圾切进结果导致 parse 失败；配平扫描只取首个完整对象，尾随正文丢弃。
   const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) return null;
-  return s.slice(start, end + 1);
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 function dangerReason(

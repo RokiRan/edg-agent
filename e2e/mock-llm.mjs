@@ -198,6 +198,16 @@ function decideAction(messages) {
       __raw: '<think>The user wants me to output only a single JSON action object. I need to redo my response properly. I was outputti',
     };
   }
+  // TrailingContent scenario: 任务文本含「尾随正文」— done JSON 之后追加含 } 的正文
+  // （模型把交付内容接着写在 JSON 后面的生产故障形状）。
+  // 旧 extractJson 用 lastIndexOf('}') 会把尾随垃圾切进来导致 parse 失败；
+  // 配平扫描只取首个完整对象，summary 完整保留。
+  const hasTrailingContent = allUserText.includes('尾随正文');
+  if (hasTrailingContent) {
+    return {
+      __raw: '{"tool":"done","summary":"完整交付: 第一题 {答案A} 第二题 {答案B}"}\n\n以下是试卷正文（这段在 JSON 之后，应被丢弃）: 题目 {示例} 略',
+    };
+  }
   const hasOrder = allUserText.includes('确认订单');
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');
