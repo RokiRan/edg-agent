@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
 import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
-import { runAgentTask, type AgentStep } from '../../lib/agent/loop';
+import { runAgentTask, type AgentStep, type AgentContinuation } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
 
 type SettingsForm = {
@@ -132,6 +132,8 @@ function App() {
   const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  // max-steps 中断的续跑状态：绑定产生它的 agent 消息，「继续」时在同一消息内接续
+  const continuationRef = useRef<{ continuation: AgentContinuation; messageId: string } | null>(null);
   // 「本次会话始终允许」：仅内存态，侧栏重开即失效
   const alwaysAllowRiskRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -201,6 +203,122 @@ function App() {
   };
   // 有 agent 任务处于 running（非等待确认/提问）时，底部悬浮思考球
   const agentThinking = messages.some((m) => m.kind === 'agent' && m.status === 'running');
+  const currentSettings = (): LLMSettings | null => {
+    if (!hydrated) return null;
+    if (!settingsForm.apiKey) return null;
+    return {
+      provider: settingsForm.provider,
+      apiKey: settingsForm.apiKey,
+      baseUrl: settingsForm.baseUrl,
+      model: settingsForm.model,
+      maxSteps: parseMaxSteps(settingsForm.maxSteps),
+    };
+  };
+
+  /** 执行/续跑 agent 任务：回调全部绑定到同一条 agent 消息，续跑时步数在同一张卡片内累加。 */
+  const runAgent = async (
+    messageId: string,
+    task: string,
+    settings: LLMSettings,
+    resume?: AgentContinuation,
+  ) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsStreaming(true);
+    if (!resume) setLastUsage(null);
+
+    try {
+      const result = await runAgentTask(task, settings, {
+        signal: controller.signal,
+        onStep: (step: AgentStep) => {
+          updateAssistant(messageId, (m) => ({
+            ...m,
+            steps: [...(m.steps ?? []), step],
+          }));
+        },
+        onConfirmRequired: (req) => {
+          // 本次会话始终允许：跳过人肉确认
+          if (alwaysAllowRiskRef.current) return Promise.resolve(true);
+          return new Promise<boolean>((resolve) => {
+            setPendingConfirm({
+              messageId,
+              resolve,
+              reason: req.reason,
+              actionJson: req.actionJson,
+            });
+            updateAssistant(messageId, (m) => ({ ...m, status: 'waiting' }));
+          });
+        },
+        onAskUser: (question, options) =>
+          new Promise<string>((resolve) => {
+            setPendingAsk({
+              messageId,
+              resolve,
+              question,
+              options,
+            });
+            updateAssistant(messageId, (m) => ({ ...m, status: 'waiting' }));
+          }),
+      }, { resume });
+
+      const finalStatus: ChatMessage['status'] =
+        result.status === 'done'
+          ? 'done'
+          : result.status === 'stopped'
+            ? 'stopped'
+            : result.status === 'max-steps'
+              ? 'max-steps'
+              : 'failed';
+
+      continuationRef.current =
+        result.status === 'max-steps' && result.continuation
+          ? { continuation: result.continuation, messageId }
+          : null;
+
+      updateAssistant(messageId, (m) => ({
+        ...m,
+        status: finalStatus,
+        content: result.summary,
+      }));
+      setLastUsage(result.usage.prompt + result.usage.completion > 0 ? result.usage : null);
+    } catch (err) {
+      const e = err as { message?: string };
+      continuationRef.current = null;
+      updateAssistant(messageId, (m) => ({
+        ...m,
+        status: 'failed',
+        content: `错误：${e.message ?? String(err)}`,
+      }));
+    } finally {
+      abortRef.current = null;
+      setIsStreaming(false);
+      setPendingConfirm((cur) => {
+        if (cur && cur.messageId === messageId) {
+          cur.resolve(false);
+          return null;
+        }
+        return cur;
+      });
+      setPendingAsk((cur) => {
+        if (cur && cur.messageId === messageId) {
+          cur.resolve('');
+          return null;
+        }
+        return cur;
+      });
+    }
+  };
+
+  /** max-steps 卡片上的「继续」（或输入框发「继续」）：在原消息内无缝接续 */
+  const continueRun = (messageId: string) => {
+    const pending = continuationRef.current;
+    if (!pending || pending.messageId !== messageId || isStreaming) return;
+    const settings = currentSettings();
+    if (!settings) return;
+    continuationRef.current = null;
+    updateAssistant(messageId, (m) => ({ ...m, status: 'running' }));
+    void runAgent(messageId, pending.continuation.task, settings, pending.continuation);
+  };
 
   const sendMessage = async () => {
     const trimmed = input.trim();
@@ -220,17 +338,7 @@ function App() {
 
     setInput('');
 
-    const settings: LLMSettings | null = (() => {
-      if (!hydrated) return null;
-      if (!settingsForm.apiKey) return null;
-      return {
-        provider: settingsForm.provider,
-        apiKey: settingsForm.apiKey,
-        baseUrl: settingsForm.baseUrl,
-        model: settingsForm.model,
-        maxSteps: parseMaxSteps(settingsForm.maxSteps),
-      };
-    })();
+    const settings: LLMSettings | null = currentSettings();
 
     if (!settings) {
       setMessages((prev) => [
@@ -241,10 +349,17 @@ function App() {
       return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     if (agentMode) {
+      // 「继续」无缝续跑：存在 max-steps 续跑状态且输入是继续指令时，接续原任务原消息
+      const pendingCont = continuationRef.current;
+      if (pendingCont && /^(继续|continue)/i.test(trimmed)) {
+        setMessages((prev) => [...prev, userMsg]);
+        continueRun(pendingCont.messageId);
+        return;
+      }
+      // 新任务使旧续跑状态失效
+      continuationRef.current = null;
+
       const agentMsg: ChatMessage = {
         ...assistantMsg,
         kind: 'agent',
@@ -253,83 +368,12 @@ function App() {
         content: '',
       };
       setMessages((prev) => [...prev, userMsg, agentMsg]);
-      setIsStreaming(true);
-      setLastUsage(null);
-
-      try {
-        const result = await runAgentTask(trimmed, settings, {
-          signal: controller.signal,
-          onStep: (step: AgentStep) => {
-            updateAssistant(assistantId, (m) => ({
-              ...m,
-              steps: [...(m.steps ?? []), step],
-            }));
-          },
-          onConfirmRequired: (req) => {
-            // 本次会话始终允许：跳过人肉确认
-            if (alwaysAllowRiskRef.current) return Promise.resolve(true);
-            return new Promise<boolean>((resolve) => {
-              setPendingConfirm({
-                messageId: assistantId,
-                resolve,
-                reason: req.reason,
-                actionJson: req.actionJson,
-              });
-              updateAssistant(assistantId, (m) => ({ ...m, status: 'waiting' }));
-            });
-          },
-          onAskUser: (question, options) =>
-            new Promise<string>((resolve) => {
-              setPendingAsk({
-                messageId: assistantId,
-                resolve,
-                question,
-                options,
-              });
-              updateAssistant(assistantId, (m) => ({ ...m, status: 'waiting' }));
-            }),
-        });
-
-        const finalStatus: ChatMessage['status'] =
-          result.status === 'done'
-            ? 'done'
-            : result.status === 'stopped'
-              ? 'stopped'
-              : 'failed';
-
-        updateAssistant(assistantId, (m) => ({
-          ...m,
-          status: finalStatus,
-          content: result.summary,
-        }));
-        setLastUsage(result.usage.prompt + result.usage.completion > 0 ? result.usage : null);
-      } catch (err) {
-        const e = err as { message?: string };
-        updateAssistant(assistantId, (m) => ({
-          ...m,
-          status: 'failed',
-          content: `错误：${e.message ?? String(err)}`,
-        }));
-      } finally {
-        abortRef.current = null;
-        setIsStreaming(false);
-        setPendingConfirm((cur) => {
-          if (cur && cur.messageId === assistantId) {
-            cur.resolve(false);
-            return null;
-          }
-          return cur;
-        });
-        setPendingAsk((cur) => {
-          if (cur && cur.messageId === assistantId) {
-            cur.resolve('');
-            return null;
-          }
-          return cur;
-        });
-      }
+      await runAgent(assistantId, trimmed, settings);
       return;
     }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     // 纯聊天路径（M1 行为）
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -527,6 +571,7 @@ function App() {
                   onConfirmResolve={handleConfirmResolve}
                   onConfirmAlways={handleConfirmAlways}
                   onAskResolve={handleAskResolve}
+                  onContinue={continueRun}
                 />
               ))}
               <div ref={messagesEndRef} />
@@ -635,14 +680,15 @@ type BubbleProps = {
   onConfirmResolve: (ok: boolean) => void;
   onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
+  onContinue: (messageId: string) => void;
 };
 
-function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResolve, onConfirmAlways, onAskResolve }: BubbleProps) {
+function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResolve, onConfirmAlways, onAskResolve, onContinue }: BubbleProps) {
   const isUser = message.role === 'user';
   const isAgent = message.kind === 'agent';
 
   if (isAgent) {
-    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} onConfirmResolve={onConfirmResolve} onConfirmAlways={onConfirmAlways} onAskResolve={onAskResolve} />;
+    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} onConfirmResolve={onConfirmResolve} onConfirmAlways={onConfirmAlways} onAskResolve={onAskResolve} onContinue={onContinue} />;
   }
 
   const showCursor =
@@ -674,6 +720,7 @@ function AgentBubble({
   onConfirmResolve,
   onConfirmAlways,
   onAskResolve,
+  onContinue,
 }: {
   message: ChatMessage;
   pendingConfirm: ConfirmState | null;
@@ -681,6 +728,7 @@ function AgentBubble({
   onConfirmResolve: (ok: boolean) => void;
   onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
+  onContinue: (messageId: string) => void;
 }) {
   const steps = message.steps ?? [];
   const status = message.status ?? 'done';
@@ -733,6 +781,19 @@ function AgentBubble({
             {status === 'waiting' && (
               <div className="text-xs text-amber-300">等待你的操作…</div>
             )}
+            {status === 'max-steps' && (
+              <>
+                {message.content && (
+                  <div className="whitespace-pre-wrap break-words text-sm text-[#fbbf24]">{message.content}</div>
+                )}
+                <button
+                  onClick={() => onContinue(message.id)}
+                  className="shrink-0 rounded-md bg-amber-400 px-2.5 py-1 text-xs font-medium text-[#0c0f14] transition-colors hover:bg-amber-300"
+                >
+                  继续
+                </button>
+              </>
+            )}
           </div>
         )}
         {pendingConfirm && (
@@ -764,6 +825,7 @@ function StatusBadge({ status }: { status: NonNullable<ChatMessage['status']> })
     done: { label: '完成', cls: 'bg-[#0f2a1e] text-[#34d399]', pulse: false },
     failed: { label: '失败', cls: 'bg-[#2d1414] text-[#f87171]', pulse: false },
     stopped: { label: '已停止', cls: 'bg-[#1d232c] text-[#8b94a3]', pulse: false },
+    'max-steps': { label: '步数上限', cls: 'bg-[#2a2110] text-[#fbbf24]', pulse: false },
   };
   const v = map[status] ?? map.done;
   return (

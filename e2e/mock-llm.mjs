@@ -209,6 +209,15 @@ function decideAction(messages) {
     };
   }
   const hasOrder = allUserText.includes('确认订单');
+  // Resume scenario: 任务文本含「步数续跑」— 永远 scroll 耗尽步数预算触发 max-steps；
+  // 看到续跑消息（用户要求继续）才回 done。验证 max-steps 续跑链路。
+  const hasResumeTest = allUserText.includes('步数续跑');
+  if (hasResumeTest) {
+    if (last.includes('用户要求继续')) {
+      return { tool: 'done', summary: '续跑后完成' };
+    }
+    return { tool: 'scroll', direction: 'down' };
+  }
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');
 

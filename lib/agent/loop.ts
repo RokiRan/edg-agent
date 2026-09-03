@@ -40,6 +40,15 @@ export interface AgentResult {
   summary: string;
   /** 任务全程 LLM token 用量累计（provider 不给 usage 时各字段为 0）。 */
   usage: ChatUsage;
+  /** status 为 max-steps 时携带：完整对话历史 + 目标标签页，用于无缝续跑 */
+  continuation?: AgentContinuation;
+}
+/** max-steps 中断时的续跑状态。仅内存持有（sidepanel ref），侧栏关闭即失效。 */
+export interface AgentContinuation {
+  task: string;
+  tabId: number;
+  messages: OutgoingMessage[];
+  usage: ChatUsage;
 }
 
 /** 契约定义的高危关键词正则。 */
@@ -212,6 +221,7 @@ export async function runAgentTask(
   task: string,
   settings: LLMSettings,
   handlers: AgentHandlers,
+  opts?: { resume?: AgentContinuation },
 ): Promise<AgentResult> {
   const { onStep, onConfirmRequired, onAskUser, signal } = handlers;
   const rawMax = Number(settings.maxSteps);
@@ -221,13 +231,25 @@ export async function runAgentTask(
   lastPageError = null;
 
   consecutiveFail = 0;
-  const totalUsage: ChatUsage = { prompt: 0, completion: 0 };
+  const resume = opts?.resume;
+  const totalUsage: ChatUsage = resume ? { ...resume.usage } : { prompt: 0, completion: 0 };
 
-  const resolvedTabId = await getTargetTabId();
-  if (resolvedTabId === null) {
-    return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage };
+  let tabId: number;
+  if (resume) {
+    // 续跑：回到原标签页；页已关闭则无法继续
+    tabId = resume.tabId;
+    try {
+      await chrome.tabs.get(tabId);
+    } catch {
+      return { status: 'failed', summary: '原标签页已关闭，无法继续任务', usage: totalUsage };
+    }
+  } else {
+    const resolvedTabId = await getTargetTabId();
+    if (resolvedTabId === null) {
+      return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage };
+    }
+    tabId = resolvedTabId;
   }
-  let tabId: number = resolvedTabId;
   const targetTab = await chrome.tabs.get(tabId);
   if (!/^https?:\/\//.test(targetTab.url ?? '')) {
     return {
@@ -253,13 +275,22 @@ export async function runAgentTask(
   await runInPage<unknown>(tabId, showOverlay, []);
   await runInPage<unknown>(tabId, cursorShow, []);
 
-  const messages: OutgoingMessage[] = [
-    { role: 'system', content: buildSystemPrompt() },
-    {
-      role: 'user',
-      content: `任务: ${task}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
-    },
-  ];
+  const messages: OutgoingMessage[] = resume
+    ? [
+        // 续跑：完整历史 + 一条「继续」指令和最新快照（页面可能已变化，旧元素 id 作废）
+        ...resume.messages,
+        {
+          role: 'user',
+          content: `用户要求继续。原始任务不变: ${task}\n已完成的步骤不要重复，基于当前页面状态继续推进，直到任务完成。\n\n最新页面:\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
+        },
+      ]
+    : [
+        { role: 'system', content: buildSystemPrompt() },
+        {
+          role: 'user',
+          content: `任务: ${task}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
+        },
+      ];
 
   let lastSummary = '';
   let consecutiveFormatErrors = 0;
@@ -598,5 +629,10 @@ export async function runAgentTask(
 
   await safeCdpDetach(tabId);
   safeHideOverlay(tabId);
-  return { status: 'max-steps', summary: lastSummary || `已达最大步数 ${maxSteps}`, usage: totalUsage };
+  return {
+    status: 'max-steps',
+    summary: lastSummary || `已达最大步数 ${maxSteps}`,
+    usage: totalUsage,
+    continuation: { task, tabId, messages, usage: totalUsage },
+  };
 }

@@ -18,5 +18,5 @@ export interface ChatMessage {
   content: string;
   kind?: 'text' | 'agent';
   steps?: AgentStep[];
-  status?: 'running' | 'done' | 'failed' | 'stopped' | 'waiting';
+  status?: 'running' | 'done' | 'failed' | 'stopped' | 'waiting' | 'max-steps';
 }
