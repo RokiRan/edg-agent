@@ -240,9 +240,18 @@ function salvageDoneSummary(raw: string): string | null {
   const start = s.indexOf('{');
   if (start === -1) return null;
   const body = s.slice(start);
-  if (!/"tool"\s*:\s*"done"/.test(body)) return null;
+  // 工具白名单：tool 写了且不是 done → 不救（其它工具没有 summary 交付语义）；
+  // tool 还没写到（截断更早）→ summary 键只有 done 有，仍可救。
+  const toolM = body.match(/"tool"\s*:\s*"(\w+)"/);
+  if (toolM && toolM[1] !== 'done') return null;
   const m = body.match(/"summary"\s*:\s*"([\s\S]*)$/);
   if (!m) return null;
+  // 形状守卫：捕获段含未转义引号 = summary 字符串已闭合、截断点在后面的键上，
+  // 贪婪捕获会把别的键值当 summary 内容——不是本兜底处理的形状，不救。
+  for (let i = 0; i < m[1].length; i++) {
+    if (m[1][i] === '\\') i++;
+    else if (m[1][i] === '"') return null;
+  }
   const inner = unescapeJsonString(m[1]).trim();
   return inner.length >= 20 ? inner : null;
 }
@@ -404,21 +413,23 @@ export async function runAgentTask(
     }
     const json = extractJson(raw);
     if (!json) {
+      // 截断形状（done.summary 写到一半未闭合）首轮即救：同预算重试必然再截，
+      // 直接抢救省一轮 35-55s 的 LLM 往返；抢救不了（纯 think 垃圾等）才走重试。
+      const salvaged = salvageDoneSummary(raw);
+      if (salvaged) {
+        await safeCdpDetach(tabId);
+        safeHideOverlay(tabId);
+        const summary = `${salvaged}\n\n（模型输出达到长度上限被截断，以上内容可能不完整，可发「继续」让我补全）`;
+        lastSummary = summary;
+        onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
+        return { status: 'done', summary, usage: totalUsage };
+      }
       consecutiveFormatErrors++;
       messages.push({ role: 'assistant', content: raw });
       messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候、前后缀文字或思考过程，直接输出 JSON' });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        // 长交付被 max_tokens 截断的兜底：done.summary 写了一半断掉时，
-        // 把已写出的内容抢救出来返回给用户，而不是整体失败
-        const salvaged = salvageDoneSummary(raw);
-        if (salvaged) {
-          const summary = `${salvaged}\n\n（模型输出达到长度上限被截断，以上内容可能不完整，可发「继续」让我补全）`;
-          lastSummary = summary;
-          onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
-          return { status: 'done', summary, usage: totalUsage };
-        }
         const diag = ` [finish_reason=${lastFinishReason ?? '?'}, 输出长度=${raw.length}]`;
         return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}${diag}`, usage: totalUsage };
       }

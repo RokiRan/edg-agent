@@ -227,6 +227,14 @@ function decideAction(messages) {
       __raw: '<think>Let me provide the final done action with the full quiz</think>\n{"tool":"done","summary":"第一题: 什么是 Agent 循环?\\n答案: 感知-决策-执行的迭代。\\n第二题: 为什么需要快照剪枝?\\n答案: 控制上下文长度,防止 （此处输出被长度截断',
     };
   }
+  // SalvageGuard scenario: 任务文本含「截断他键」— summary 已闭合、截断点在后面的键。
+  // 形状守卫（捕获段含未转义引号）必须拒绝抢救，走重试后确定性失败+诊断。
+  const hasSalvageGuard = allUserText.includes('截断他键');
+  if (hasSalvageGuard) {
+    return {
+      __raw: '{"tool":"done","summary":"这是一个已经完整闭合的摘要内容,不应该被抢救","extra":"值写到一半被截断',
+    };
+  }
   const hasSearch = allUserText.includes('测试搜索站');
   const hasDropdown = allUserText.includes('下拉测试页');
 
