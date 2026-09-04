@@ -75,9 +75,8 @@ edg-agent/
 ├─ e2e/
 │  ├─ mock-llm.mjs            # 确定性状态机假 LLM（127.0.0.1:4399）
 │  ├─ prepare-ext.mjs         # 把 build 产物拷到 /tmp/edg-e2e-ext + 注入 host_permissions
-│  └─ pages/                  # 测试用 HTML 页面（bigform / cascader / dropdown …）
-├─ public/icons/              # 16/32/48/128 png
-├─ wxt.config.ts              # 清单 + 模块配置
+│  ├─ run-upload.mjs          # upload 工具的端到端驱动（puppeteer-core）
+│  └─ pages/                  # 测试用 HTML 页面（bigform / cascader / dropdown / upload …）
 ├─ tailwind.config.js
 ├─ postcss.config.js
 ├─ tsconfig.json
@@ -148,6 +147,7 @@ Agent 循环位于 [lib/agent/loop.ts](lib/agent/loop.ts)，核心契约：
   |---|---|
   | `click` / `type` / `select` / `scroll` | 基于快照元素 id 的基本操作 |
   | `click_at` / `type_focused` | 视口归一化坐标点击 / 焦点输入（截图兜底用） |
+| `upload` | 文件上传：`paths` 给本机绝对路径。三条路径：(a) 可见 file input 直接 `DOM.setFileInputFiles`；(b) 「选择文件」类按钮走 `Page.setInterceptFileChooserDialog` 拦截 + 喂隐藏 input；(c) 纯拖拽区走影子 `<input data-edg-shadow>` + 合成 drag/drop 事件。一律过高危确认闸。 |
   | `navigate` / `new_tab` | 标签页导航 |
   | `ask_user` | 缺信息时反问；可附 `options` 渲染为可点选按钮 |
   | `read_page` | 按需取页面正文（首轮快照默认附带；后续轮次需显式调用） |
@@ -156,25 +156,46 @@ Agent 循环位于 [lib/agent/loop.ts](lib/agent/loop.ts)，核心契约：
 - **温度与预算**：`chat()` 显式 `temperature=0` 消除动作漂移，`max_tokens=4096` 给足推理模型的 think + JSON 预算；格式错误重试时升级预算与温度。
 - **Token 遥测**：每步从 usage 字段累加，footer 显示 `↑<prompt> ↓<completion>`。
 - **历史剪枝**：快照消息只保留最近 2 份完整内容，更早的改写为占位符，prompt 体积 O(n²)→O(n)。
+- **文件上传**：快照给 file input 标注 `accept=`；LLM 发 `{"tool":"upload","id":N,"paths":[...]}`，后台用已附加的 `chrome.debugger` 执行 `DOM.setFileInputFiles`（浏览器进程读盘，扩展不碰文件内容）。三条路径：(a) 可见 file input 直接注入；(b) 「选择文件」类按钮走 `Page.setInterceptFileChooserDialog` 拦截 + 喂隐藏 input；(c) 纯拖拽区（无 file input）走影子 `<input data-edg-shadow>` + 合成 `dragenter/dragover/drop` 事件。三条都过同一道高危确认闸。实现特殊的拖拽区（如 DataTransfer 自定义 items、自定义 `drop` 处理函数）才退化 `ask_user` 请用户手动拖入。
 
 ## E2E 测试
 
-测试用纯 Node（≥20）写的 mock LLM，零外部依赖。
+测试用纯 Node（≥20）写的 mock LLM，零外部依赖。`mock-llm.mjs` 是确定性状态机假 LLM（127.0.0.1:4399，按任务行关键词 + 步数分流）。
 
 ```bash
 # 终端 1：构建产物 + 拷到 /tmp/edg-e2e-ext
 node e2e/prepare-ext.mjs
 
-# 终端 2：起 mock LLM（默认 127.0.0.1:4399）
+# 终端 2：起 mock LLM（默认 127.0.0.1:4399；MOCK_DEBUG=1 调试日志）
 node e2e/mock-llm.mjs
 
-# 终端 3：跑 puppeteer 驱动（外部仓库测试，或自己写脚本）
-# 详见 .output/chrome-mv3 + e2e/pages/*.html
+# 终端 3：跑具体场景的 puppeteer 驱动
+# （旧场景外部仓库脚本；新增的 upload 工具自带 e2e/run-upload.mjs，见下节）
 ```
 
-测试页面在 [e2e/pages/](e2e/pages/)：模拟不同 UI 形态（antd / element-plus 级联、原生 select、canvas、长表单、危险操作确认等）。
+
+
+### Upload 工具（端到端）
+
+`e2e/run-upload.mjs`
+
+```bash
+# 前置 1：构建 + 把产物拷到 /tmp/edg-e2e-ext
+npm run build && node e2e/prepare-ext.mjs
+
+# 前置 2：起 mock LLM（默认 127.0.0.1:4399；需先启；进程级计数，跨次跑累加）
+node e2e/mock-llm.mjs &
+# 主流程：一条命令（自动 pkill 残留 Chrome、随机 debug port、retry-on-TargetClosed）
+node e2e/run-upload.mjs
+# 退出码：0=五项断言全绿，1=setup failure，2=assertion failure
+```
+
+五项断言：`#log1` / `#log2` / `#log3` 含 `edg-upload-fixture.txt`、mock `/__stats sawUpload === 3`、任务终态 `done`。
+
+`upload.html` 含可见 file input（id=file1）、按钮触发隐藏 file input（包在 `<form id="triggerForm">` 内，`findFileInput` 走 form 回退）、纯拖拽区 `<div class="dropzone">`（快照 candidates 含 `[class*="dropzone"]`，走影子 input + 合成 drop 事件）。Mock LLM 上传场景按任务行含「上传测试」+ 步数分流：results=0 → upload 可见 input；results=1 → upload「选择文件」按钮；results=2 → upload 拖拽区；results>=3 → done。
 
 ### 已知 gap
+
 
 [lib/agent/loop.ts](lib/agent/loop.ts) 里的 `chrome.permissions.request` 运行时流程
 （`runInPage` catch → request → retry）**e2e 不会覆盖**——因为 [e2e/prepare-ext.mjs](e2e/prepare-ext.mjs)

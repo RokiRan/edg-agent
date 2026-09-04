@@ -11,7 +11,16 @@ import {
 } from './actions';
 import { getTargetTabId } from './targetTab';
 import { buildSystemPrompt, buildSnapshotMessage } from './prompt';
-import { cdpClick, cdpInsertText, cdpWheel, cdpDetach } from './cdp';
+import {
+  cdpClick,
+  cdpInsertText,
+  cdpWheel,
+  cdpDetach,
+  cdpSetFiles,
+  cdpSetFileChooserInterception,
+  pollFileChooserOpened,
+  clearFileChooserOpened,
+} from './cdp';
 import type { LLMSettings } from '../types';
 
 /** 注入函数 edgAct 的返回值（含 CDP prep 分支的额外字段）。 */
@@ -543,26 +552,39 @@ export async function runAgentTask(
 
     // 高危闸
     const tool = action.tool;
+    let confirmReason: string | null = null;
     if (tool === 'click' || tool === 'type') {
       const targetId = typeof action.id === 'number' ? action.id : -1;
       const el = snapshot.elements.find((e) => e.id === targetId);
       if ((el && DANGEROUS_RE.test(el.text)) || DANGEROUS_URL_RE.test(snapshot.url)) {
-        const req: ConfirmRequest = {
-          reason: dangerReason(action, el, snapshot.url),
-          actionJson: JSON.stringify(action),
-        };
-        let allowed = false;
-        try {
-          allowed = await abortable(onConfirmRequired(req), signal);
-        } catch (err) {
-          if (err instanceof AbortedError) throw err;
-          allowed = false;
-        }
-        if (!allowed) {
-          await safeCdpDetach(tabId);
-          safeHideOverlay(tabId);
-          return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage };
-        }
+        confirmReason = dangerReason(action, el, snapshot.url);
+      }
+    } else if (tool === 'upload') {
+      // 上传本地文件 = 数据外发，无论目标文案/URL 一律要用户确认
+      const targetId = typeof action.id === 'number' ? action.id : -1;
+      const el = snapshot.elements.find((e) => e.id === targetId);
+      const label = el ? el.text || el.placeholder || el.tag : `#${targetId}`;
+      const paths = Array.isArray(action.paths)
+        ? action.paths.filter((p): p is string => typeof p === 'string')
+        : [];
+      confirmReason = `将把本机文件 ${paths.join(', ') || '(未指定路径)'} 上传到「${label}」（${snapshot.url}）。文件内容会发送给该网站，请确认路径与目标无误。`;
+    }
+    if (confirmReason) {
+      const req: ConfirmRequest = {
+        reason: confirmReason,
+        actionJson: JSON.stringify(action),
+      };
+      let allowed = false;
+      try {
+        allowed = await abortable(onConfirmRequired(req), signal);
+      } catch (err) {
+        if (err instanceof AbortedError) throw err;
+        allowed = false;
+      }
+      if (!allowed) {
+        await safeCdpDetach(tabId);
+        safeHideOverlay(tabId);
+        return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage };
       }
     }
 
@@ -687,6 +709,85 @@ export async function runAgentTask(
       const res = (await runInPage<EdgActResult>(tabId, edgAct, ['type_focused', { text } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       ok = !!res.ok;
       info = res.info;
+    } else if (tool === 'upload') {
+      const id = typeof action.id === 'number' ? action.id : -1;
+      const rawPaths = Array.isArray(action.paths)
+        ? action.paths
+        : typeof action.path === 'string'
+          ? [action.path]
+          : [];
+      const paths = rawPaths
+        .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        .slice(0, 10);
+      const badPath = paths.find((p) => !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p));
+      const baseNames = paths.map((p) => p.split(/[\\/]/).pop() ?? p).join(', ');
+      if (paths.length === 0) {
+        ok = false;
+        info = 'upload 需要 paths（本机绝对路径数组）；路径不明确时先用 ask_user 向用户确认，不要编造路径';
+      } else if (badPath) {
+        ok = false;
+        info = `路径不是本机绝对路径: ${badPath}（需 / 或盘符开头）；请用 ask_user 向用户确认完整路径`;
+      } else {
+        const prep =
+          (await runInPage<EdgActResult>(tabId, edgAct, ['upload_prep', { id } as EdgActArgs], signal)) ??
+          { ok: false, info: `页面脚本未返回结果${lastPageError ? `: ${lastPageError}` : ''}` };
+        if (!prep.ok) {
+          ok = false;
+          info = prep.info ?? 'element not found';
+        } else if (prep.kind === 'input') {
+          // 可见 file input：直接注入，不点不弹框
+          const set = await cdpSetFiles(tabId, `[data-edg-id="${id}"]`, paths);
+          await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
+          ok = set.ok;
+          info = set.ok
+            ? `已注入 ${paths.length} 个文件: ${baseNames}`
+            : `文件注入失败: ${set.error ?? '未知原因'}（路径: ${paths.join(', ')}）`;
+        } else if (prep.kind === 'drop') {
+          // 纯拖拽区：影子 input 已就位（data-edg-upload=1），喂文件后回页面合成 drop 事件
+          const set = await cdpSetFiles(tabId, '[data-edg-upload="1"]', paths);
+          if (!set.ok) {
+            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
+            ok = false;
+            info = `文件注入失败: ${set.error ?? '未知原因'}（路径: ${paths.join(', ')}）`;
+          } else {
+            const drop =
+              (await runInPage<EdgActResult>(tabId, edgAct, ['upload_drop', { x: Number(prep.x), y: Number(prep.y) } as EdgActArgs], signal)) ??
+              { ok: false, info: `页面脚本未返回结果${lastPageError ? `: ${lastPageError}` : ''}` };
+            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
+            ok = !!drop.ok;
+            info = drop.info;
+          }
+        } else {
+          // 触发器路径：拦截原生文件选择框 → CDP 点击 → 等选择框事件 → 往隐藏 input 喂文件
+          clearFileChooserOpened(tabId);
+          const armed = await cdpSetFileChooserInterception(tabId, true);
+          if (!armed) {
+            ok = false;
+            info = 'debugger 附加失败，无法拦截文件选择框';
+          } else {
+            const clicked = await cdpClick(tabId, Number(prep.x), Number(prep.y));
+            const opened = clicked && (await pollFileChooserOpened(tabId, 5000));
+            void cdpSetFileChooserInterception(tabId, false);
+            await runInPage(tabId, edgAct, ['action_done', {} as EdgActArgs], signal);
+            if (!opened) {
+              ok = false;
+              info = '点击后未弹出文件选择框（该元素可能不是上传按钮）；如页面只有拖拽区，请用 ask_user 请用户手动拖入文件';
+            } else {
+              const set = await cdpSetFiles(tabId, '[data-edg-upload="1"]', paths);
+              ok = set.ok;
+              info = set.ok
+                ? `已注入 ${paths.length} 个文件: ${baseNames}`
+                : `文件注入失败: ${set.error ?? '未知原因'}（路径: ${paths.join(', ')}）`;
+            }
+          }
+        }
+        // 上传后页面常做异步校验/预览，稍等再取快照
+        if (ok) {
+          const { promise: waitP, resolve: waitR } = Promise.withResolvers<void>();
+          setTimeout(waitR, 800);
+          await waitP;
+        }
+      }
     } else if (tool === 'navigate') {
       const url = typeof action.url === 'string' ? action.url : '';
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -770,7 +871,7 @@ export async function runAgentTask(
       info = `unknown tool ${tool}`;
     }
 
-    // 仅对六个页面动作（click/type/select/scroll/click_at/type_focused）累计连续失败
+    // 仅对页面动作（click/type/select/scroll/click_at/type_focused/upload）累计连续失败
     // navigate/new_tab/ask_user/done/unknown 不计入
     if (
       tool === 'click' ||
@@ -778,7 +879,8 @@ export async function runAgentTask(
       tool === 'select' ||
       tool === 'scroll' ||
       tool === 'click_at' ||
-      tool === 'type_focused'
+      tool === 'type_focused' ||
+      tool === 'upload'
     ) {
       if (ok) {
         consecutiveFail = 0;

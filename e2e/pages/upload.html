@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>上传测试页</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      section { margin: 12px 0; padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; }
+      section h2 { font-size: 14px; margin: 0 0 8px; color: #374151; }
+      .log { margin-top: 8px; padding: 6px 10px; background: #f3f4f6; border-radius: 4px; font-family: monospace; min-height: 22px; }
+      /* 拖拽区：class="dropzone" 才能进 snapshot candidates */
+      .dropzone { width: 240px; height: 80px; border: 2px dashed #9ca3af; border-radius: 6px;
+                  display: flex; align-items: center; justify-content: center; color: #6b7280;
+                  background: #fafafa; }
+      /* 触发器路径：隐藏的 file input，外部只能通过按钮触发 */
+      #file2 { display: none; }
+      button { font: inherit; padding: 6px 14px; cursor: pointer; border: 1px solid #d1d5db; background: #fff; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>上传测试页</h1>
+
+      <section>
+        <h2>可见 file input</h2>
+        <input id="file1" type="file" accept=".txt" />
+        <div class="log" id="log1">(尚未选择)</div>
+      </section>
+
+      <form id="triggerForm">
+        <section>
+          <h2>按钮触发隐藏 file input</h2>
+          <button id="pickBtn" type="button">选择文件</button>
+          <input id="file2" type="file" accept=".txt" />
+          <div class="log" id="log2">(尚未选择)</div>
+        </section>
+      </form>
+
+      <section>
+        <h2>纯拖拽区</h2>
+        <div class="dropzone" id="dropZone" tabindex="0">把文件拖到这里（不通过上传按钮）</div>
+        <div class="log" id="log3">(尚未选择)</div>
+      </section>
+    </main>
+    <script>
+      (function () {
+        const file1 = document.getElementById('file1');
+        const file2 = document.getElementById('file2');
+        const pickBtn = document.getElementById('pickBtn');
+        const dropZone = document.getElementById('dropZone');
+        const log1 = document.getElementById('log1');
+        const log2 = document.getElementById('log2');
+        const log3 = document.getElementById('log3');
+        const triggerForm = document.getElementById('triggerForm');
+
+        triggerForm.addEventListener('submit', function (ev) {
+          ev.preventDefault();
+        });
+
+        file1.addEventListener('change', function () {
+          const name = file1.files && file1.files[0] ? file1.files[0].name : '(空)';
+          log1.textContent = '已选: ' + name;
+        });
+
+        pickBtn.addEventListener('click', function () {
+          file2.click();
+        });
+
+        file2.addEventListener('change', function () {
+          const name = file2.files && file2.files[0] ? file2.files[0].name : '(空)';
+          log2.textContent = '已选: ' + name;
+        });
+
+        // 拖拽区：dragover 必须 preventDefault，否则浏览器把 drop 当作 navigation 拦截掉。
+        // drop 时若 dataTransfer.files 非空则把文件名写进 log3。
+        dropZone.addEventListener('dragenter', function (ev) { ev.preventDefault(); });
+        dropZone.addEventListener('dragover', function (ev) { ev.preventDefault(); });
+        dropZone.addEventListener('drop', function (ev) {
+          ev.preventDefault();
+          const files = ev.dataTransfer && ev.dataTransfer.files ? Array.from(ev.dataTransfer.files) : [];
+          const name = files[0] ? files[0].name : '(空)';
+          log3.textContent = '已选: ' + name;
+        });
+      })();
+    </script>
+  </body>
+</html>

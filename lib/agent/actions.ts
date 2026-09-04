@@ -8,6 +8,8 @@ export interface ElInfo {
   type: string | null;
   placeholder: string | null;
   href: string | null;
+  /** 仅 file input：accept 属性（允许的文件类型），其余元素为 null。 */
+  accept?: string | null;
   options?: string[];
 }
 
@@ -28,9 +30,13 @@ export function domSnapshot(): PageSnapshot {
   // Clear stale markers
   const stale = document.querySelectorAll('[data-edg-id]');
   stale.forEach((n) => n.removeAttribute('data-edg-id'));
+  // 上一轮 upload 打在隐藏 file input 上的标记一并清掉
+  document.querySelectorAll('[data-edg-upload]').forEach((n) => n.removeAttribute('data-edg-upload'));
+  // 拖拽上传留下的影子 input 直接移除（我们自己注入的，不属于页面）
+  document.querySelectorAll('input[data-edg-shadow]').forEach((n) => n.remove());
 
   const elements: ElInfo[] = [];
-  const candidates = document.querySelectorAll('a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="combobox"], [role="textbox"], [role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [contenteditable=""], [contenteditable="true"], [onclick], .ant-select-item-option, .el-select-dropdown__item');
+  const candidates = document.querySelectorAll('a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="combobox"], [role="textbox"], [role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [contenteditable=""], [contenteditable="true"], [onclick], .ant-select-item-option, .el-select-dropdown__item, [class*="dropzone"], [class*="drop-zone"], [id*="dropzone"], [data-dropzone], .el-upload-dragger, .ant-upload-drag');
 
   // 两遍收集：先表单/控件，再链接等其余可交互元素。
   // 文档很长时（如组件库文档页），150 条上限按 DOM 序会被导航链接耗尽，
@@ -108,6 +114,9 @@ export function domSnapshot(): PageSnapshot {
       placeholder: placeholder || null,
       href: href || null,
     };
+    if (tag === 'input' && type === 'file') {
+      info.accept = el.getAttribute('accept');
+    }
 
     if (tag === 'select') {
       const opts: string[] = [];
@@ -304,6 +313,17 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
       const dur = Math.max(180, Math.min(600, Math.round(dist * 0.6)));
       const start = performance.now();
       const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+      // 后台标签页 rAF 暂停：动画只是视觉效果，超时直接落到终点，不能卡死整个动作
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        cur.style.left = (tx - 4) + 'px';
+        cur.style.top = (ty - 2) + 'px';
+        winStore.__edgCursor = { x: tx, y: ty };
+        resolve();
+      };
+      setTimeout(finish, dur + 800);
       const step = (now: number): void => {
         const elapsed = now - start;
         const t = Math.min(1, elapsed / dur);
@@ -316,7 +336,7 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
         if (t < 1) {
           requestAnimationFrame(step);
         } else {
-          resolve();
+          finish();
         }
       };
       requestAnimationFrame(step);
@@ -645,6 +665,108 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
       return { ok: true, editable: true, tag, info: `typed "${text}" into contenteditable <${tag}>` };
     }
     return { ok: false, info: `unsupported element type <${tag}>` };
+  }
+
+  if (tool === 'upload_prep') {
+    const id = typeof args.id === 'number' ? args.id : -1;
+    const el = byId(id);
+    if (!el) return { ok: false, info: 'element not found' };
+    (window as unknown as { __edgCtx?: Element }).__edgCtx = el;
+    const tag = el.tagName.toLowerCase();
+    const text = trim(
+      (el as HTMLElement).innerText || (el as HTMLInputElement).value || '',
+      30,
+    );
+    (el as HTMLElement).scrollIntoView({ block: 'center' });
+    await sleep(200);
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    await move(st.cur, stateRef, cx, cy);
+    setStatus(st.status, st.cur, '上传文件');
+
+    // 目标本身就是可见 file input：直接 DOM.setFileInputFiles，无需点击
+    if (el instanceof HTMLInputElement && el.type === 'file') {
+      return { ok: true, kind: 'input', tag, text, info: `upload target <input type=file> "${text}"` };
+    }
+
+    // 触发器（按钮/拖拽区里的链接等）：找到它背后的隐藏 file input 并打标，
+    // 由 CDP 点击触发 + 拦截文件选择框后按标记喂文件。
+    const findFileInput = (start: HTMLElement): HTMLInputElement | null => {
+      const direct = start.querySelector('input[type="file"]');
+      if (direct) return direct as HTMLInputElement;
+      const label = start.closest('label');
+      if (label) {
+        const inLabel = label.querySelector('input[type="file"]');
+        if (inLabel) return inLabel as HTMLInputElement;
+      }
+      const form = start.closest('form');
+      if (form) {
+        const inForm = form.querySelector('input[type="file"]');
+        if (inForm) return inForm as HTMLInputElement;
+      }
+      const all = document.querySelectorAll('input[type="file"]');
+      if (all.length === 1) return all[0] as HTMLInputElement;
+      return null;
+    };
+    const input = findFileInput(el as HTMLElement);
+    if (!input) {
+      // 纯拖拽区：造影子 file input，DOM.setFileInputFiles 喂文件后 JS 侧拿到真 File，
+      // 再由 upload_drop 合成 dragenter/dragover/drop 事件派发到该区域。
+      document.querySelectorAll('input[data-edg-shadow]').forEach((n) => n.remove());
+      const shadow = document.createElement('input');
+      shadow.type = 'file';
+      shadow.multiple = true;
+      shadow.style.display = 'none';
+      shadow.setAttribute('data-edg-upload', '1');
+      shadow.setAttribute('data-edg-shadow', '1');
+      document.body.appendChild(shadow);
+      ripple(st.root, cx, cy);
+      return { ok: true, kind: 'drop', x: cx, y: cy, tag, text, info: `drop-upload <${tag}> "${text}"` };
+    }
+    document.querySelectorAll('[data-edg-upload]').forEach((n) => n.removeAttribute('data-edg-upload'));
+    input.setAttribute('data-edg-upload', '1');
+    ripple(st.root, cx, cy);
+    return { ok: true, kind: 'trigger', x: cx, y: cy, tag, text, info: `upload via trigger <${tag}> "${text}"` };
+  }
+
+  if (tool === 'upload_drop') {
+    // 拖拽落文件：从影子 input 取 File → DataTransfer → 合成事件序列。
+    // 目标是 upload_prep 记下的 __edgCtx（拖拽区元素），不在/不连通时退回坐标命中。
+    const shadow = document.querySelector('input[data-edg-shadow]') as HTMLInputElement | null;
+    if (!shadow || !shadow.files || shadow.files.length === 0) {
+      return { ok: false, info: 'shadow input 无文件（setFileInputFiles 未成功？）' };
+    }
+    const ctxStore = window as unknown as { __edgCtx?: Element };
+    const ctxEl = ctxStore.__edgCtx as HTMLElement | undefined;
+    const zone =
+      ctxEl && ctxEl.isConnected
+        ? ctxEl
+        : (document.elementFromPoint(
+            typeof args.x === 'number' ? args.x : 0,
+            typeof args.y === 'number' ? args.y : 0,
+          ) as HTMLElement | null);
+    if (!zone) {
+      shadow.remove();
+      return { ok: false, info: 'no drop target' };
+    }
+    const files = Array.from(shadow.files);
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(f);
+    const cx = typeof args.x === 'number' ? args.x : 0;
+    const cy = typeof args.y === 'number' ? args.y : 0;
+    const mk = (type: string): DragEvent =>
+      new DragEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, dataTransfer: dt });
+    zone.dispatchEvent(mk('dragenter'));
+    zone.dispatchEvent(mk('dragover'));
+    zone.dispatchEvent(mk('drop'));
+    shadow.remove();
+    await sleep(150);
+    setStatus(st.status, st.cur, '');
+    return {
+      ok: true,
+      info: `已拖入 ${files.length} 个文件到 <${zone.tagName.toLowerCase()}>: ${files.map((f) => f.name).join(', ')}`,
+    };
   }
 
   if (tool === 'action_done') {
