@@ -20,6 +20,13 @@ import {
   cdpSetFileChooserInterception,
   pollFileChooserOpened,
   clearFileChooserOpened,
+  cdpEnableDialogWatch,
+  cdpHandleDialog,
+  peekPendingDialog,
+  takePendingDialog,
+  drainAutoDialogs,
+  waitPendingDialog,
+  onNextDialog,
 } from './cdp';
 import type { LLMSettings } from '../types';
 
@@ -167,10 +174,25 @@ function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 /** 在指定标签页执行一个自包含函数（必须来自 ./actions），并取回结果。signal 中止时立即 reject AbortedError。 */
 async function runInPage<T>(tabId: number, func: (...args: any[]) => unknown, args: unknown[], signal?: AbortSignal): Promise<T | null> {
   const inject = async (): Promise<T | null> => {
+    // 已有待应答对话框（confirm/prompt）：页面已冻结，executeScript 注定 15s 超时，
+    // 同步短路返回 null
+    if (peekPendingDialog(tabId)) {
+      lastPageError = '页面被原生对话框（alert/confirm/prompt）阻断';
+      return null;
+    }
+    // 原生对话框（alert/confirm/prompt）冻结页面主线程时 executeScript 不会返回，
+    // 与对话框事件竞态：立刻软失败（返回 null），不烧 15s 超时。
+    const dlg = onNextDialog(tabId);
     const res = await Promise.race([
       chrome.scripting.executeScript({ target: { tabId }, func, args }),
       new Promise<null>((r) => setTimeout(() => r(null), 15000)),
+      dlg.promise.then(() => 'dialog' as const),
     ]);
+    dlg.cancel();
+    if (res === 'dialog') {
+      lastPageError = '页面被原生对话框（alert/confirm/prompt）阻断';
+      return null;
+    }
     if (res === null) throw new Error('页面脚本执行超时（15s）');
     return (res?.[0]?.result as T | undefined) ?? null;
   };
@@ -401,6 +423,9 @@ export async function runAgentTask(
   }
   await runInPage<unknown>(tabId, showOverlay, [], signal);
   await runInPage<unknown>(tabId, cursorShow, [], signal);
+  // 开启原生对话框监听（attach + Page.enable）：必须在首个动作前完成，
+  // 否则 beforeunload/confirm 事件静默丢失，navigate 会被对话框卡死
+  await cdpEnableDialogWatch(tabId);
 
   // 跨任务上下文连续性：本会话此前完成的任务摘要注入首条消息
   // （resume 续跑自带完整历史，不需要）。
@@ -594,7 +619,11 @@ export async function runAgentTask(
     let ok = false;
     let info = '';
 
-    if (tool === 'click') {
+    if (tool !== 'dialog' && peekPendingDialog(tabId)) {
+      // 对话框未应答时页面 JS 冻结，任何页面动作都注定失败——直接拦截省一步往返
+      ok = false;
+      info = '页面有未应答的原生对话框，页面已冻结，其它工具暂时不可用。请先用 {"tool":"dialog","action":"accept"|"dismiss"} 应答';
+    } else if (tool === 'click') {
       const id = typeof action.id === 'number' ? action.id : -1;
       const prep = (await runInPage<EdgActResult>(tabId, edgAct, ['click_prep', { id } as EdgActArgs], signal)) ?? { ok: false, info: 'no result' };
       if (!prep.ok) {
@@ -811,11 +840,28 @@ export async function runAgentTask(
         await safeCdpDetach(tabId);
         tabId = created.id;
         await waitForTabComplete(created.id, signal);
+        // 新标签页重新开启对话框监听（cdpDetach 已清掉旧页状态）
+        await cdpEnableDialogWatch(tabId);
         ok = true;
         info = `opened new tab ${created.id} with ${url}`;
       } else {
         ok = false;
         info = 'failed to create tab';
+      }
+    } else if (tool === 'dialog') {
+      // 应答原生 confirm/prompt（alert/beforeunload 已在 cdp.ts 事件监听里自动应答）
+      const pend = takePendingDialog(tabId);
+      if (!pend) {
+        ok = false;
+        info = '当前没有等待应答的对话框（可能已被页面自动关闭），请基于最新快照继续任务';
+      } else {
+        const accept = action.action !== 'dismiss';
+        const text = typeof action.text === 'string' ? action.text : undefined;
+        const r = await cdpHandleDialog(tabId, accept, pend.type === 'prompt' ? text : undefined);
+        ok = r.ok;
+        info = r.ok
+          ? `已${accept ? '确认' : '取消'}${pend.type === 'prompt' ? '输入对话框' : '确认对话框'}: "${pend.message}"${pend.type === 'prompt' && accept && text !== undefined ? `，输入: "${text}"` : ''}`
+          : `对话框应答失败: ${r.error ?? '未知原因'}`;
       }
     } else if (tool === 'ask_user') {
       const question = typeof action.question === 'string' ? action.question : '';
@@ -891,10 +937,35 @@ export async function runAgentTask(
 
     onStep({ tool, args: argsForStep, ok, info });
 
+    // 自动应答的对话框（alert/beforeunload）不静默吞，message 拼进执行结果给 LLM 观察
+    const autoDlgs = drainAutoDialogs(tabId);
+    const autoNote =
+      autoDlgs.length > 0
+        ? `\n（${autoDlgs.map((d) => `页面弹出 ${d.type}: "${d.message}"，已自动${d.type === 'beforeunload' ? '允许继续' : '关闭'}`).join('；')}）`
+        : '';
+
+    // confirm/prompt 待应答：页面 JS 已冻结，快照拿不到——跳过快照直接上抛给 LLM。
+    // 短轮询 300ms：对话框事件经 chrome.debugger.onEvent 异步到达，动作刚结束时可能还在路上
+    const pendDlg = await waitPendingDialog(tabId, 300);
+    if (pendDlg) {
+      messages.push({
+        role: 'user',
+        content:
+          `执行结果: ${ok ? info : `失败 - ${info}`}${autoNote}\n\n` +
+          `页面弹出${pendDlg.type === 'prompt' ? '输入对话框' : '确认对话框'}: "${pendDlg.message}"` +
+          (pendDlg.type === 'prompt' && pendDlg.defaultPrompt ? `（默认输入: "${pendDlg.defaultPrompt}"）` : '') +
+          `\n页面已冻结，其它工具暂时不可用。请用 {"tool":"dialog","action":"accept"|"dismiss"` +
+          (pendDlg.type === 'prompt' ? ',"text":"输入内容"' : '') +
+          '} 应答（confirm 需读清消息：与任务目标一致才 accept，涉及删除/支付/发送等不可逆操作且任务未明确要求时 dismiss）。',
+      });
+      await reportTab();
+      continue;
+    }
+
     snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
     messages.push({
       role: 'user',
-      content: `执行结果: ${ok ? info : `失败 - ${info}`}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
+      content: `执行结果: ${ok ? info : `失败 - ${info}`}${autoNote}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,
     });
     pruneSnapshots(messages);
       await reportTab();

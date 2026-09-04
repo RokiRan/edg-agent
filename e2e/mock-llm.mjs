@@ -16,6 +16,12 @@ let sawSteer = false;
 let sawHistory = false;
 // 上传测试：mock 每发一次 upload 工具动作 +1（驱动 3 次 = 3：file input + 按钮 + 拖拽区）
 let sawUpload = 0;
+// 对话框测试：mock 每发一次 dialog 工具动作 +1（期望 2：confirm + prompt）
+let sawDialog = 0;
+// 见到 alert 自动应答回执（autoNote 拼进执行结果）
+let sawAutoAlert = false;
+// 见到「页面有未应答的原生对话框」拦截闸（故意发错动作触发）
+let sawDialogGuard = false;
 
 // --- Helpers ---
 
@@ -114,6 +120,50 @@ function decideAction(messages) {
   }
   if (taskLine.includes('慢响应')) {
     return { tool: 'done', summary: '慢响应完成', __delay: 20000 };
+  }
+  // 对话框场景：任务含「对话框测试」— 状态机按 last 内容推进（short-circuit 消息
+  // 不含快照，results 计数不可靠，不能按步数分流）：
+  // click 弹出提示 → 见 alert 自动关闭回执 → click 弹出确认 → 见确认框上抛 →
+  // 故意发 scroll（验证拦截闸）→ 见「页面有未应答」→ dialog accept →
+  // click 弹出输入 → 见输入框上抛 → dialog accept+text → done。
+  if (taskLine.includes('对话框测试')) {
+    if (last.includes('已确认输入对话框')) {
+      if (!last.includes('输入: "VIP999"')) return { tool: 'done', summary: 'prompt 的 text 没有透传' };
+      return { tool: 'done', summary: '对话框测试完成' };
+    }
+    if (last.includes('页面弹出输入对话框')) {
+      if (!last.includes('"请输入优惠码"')) return { tool: 'done', summary: 'prompt 消息内容不对' };
+      sawDialog += 1;
+      return { tool: 'dialog', action: 'accept', text: 'VIP999' };
+    }
+    if (last.includes('已确认确认对话框')) {
+      const m = last.match(/^\[(\d+)\] button[^\n]*"弹出输入"/m);
+      if (!m) return { tool: 'done', summary: '找不到弹出输入按钮' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    if (last.includes('页面有未应答的原生对话框')) {
+      sawDialogGuard = true;
+      return { tool: 'dialog', action: 'accept' };
+    }
+    if (last.includes('页面弹出确认对话框')) {
+      if (!last.includes('"确定要删除该订单吗？"')) return { tool: 'done', summary: 'confirm 消息内容不对' };
+      sawDialog += 1;
+      // 故意发非 dialog 动作：验证 loop 的冻结拦截闸
+      return { tool: 'scroll', direction: 'down' };
+    }
+    if (last.includes('页面弹出 alert')) {
+      if (!last.includes('库存不足')) return { tool: 'done', summary: 'alert 消息内容不对' };
+      sawAutoAlert = true;
+      const m = last.match(/^\[(\d+)\] button[^\n]*"弹出确认"/m);
+      if (!m) return { tool: 'done', summary: '找不到弹出确认按钮' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    if (results === 0) {
+      const m = last.match(/^\[(\d+)\] button[^\n]*"弹出提示"/m);
+      if (!m) return { tool: 'done', summary: '找不到弹出提示按钮' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return { tool: 'done', summary: `对话框测试：状态机未覆盖: ${last.slice(0, 120)}` };
   }
   if (taskLine.includes('多步测试')) {
     if (results < 6) return { tool: 'scroll', direction: 'down' };
@@ -392,7 +442,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/__stats') {
-    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload });
+    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard });
     return;
   }
 

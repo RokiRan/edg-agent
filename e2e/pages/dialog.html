@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>对话框测试页</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      button { font: inherit; padding: 6px 12px; cursor: pointer; margin-right: 8px; }
+      .result { margin-top: 16px; color: #16a34a; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>对话框测试页</h1>
+      <button id="btnAlert" type="button">弹出提示</button>
+      <button id="btnConfirm" type="button">弹出确认</button>
+      <button id="btnPrompt" type="button">弹出输入</button>
+      <div id="alertResult" class="result" hidden></div>
+      <div id="confirmResult" class="result" hidden></div>
+      <div id="promptResult" class="result" hidden></div>
+    </main>
+    <script>
+      (function () {
+        document.getElementById('btnAlert').addEventListener('click', function () {
+          alert('库存不足，无法下单');
+          const el = document.getElementById('alertResult');
+          el.textContent = 'alert已返回';
+          el.hidden = false;
+        });
+        document.getElementById('btnConfirm').addEventListener('click', function () {
+          const r = confirm('确定要删除该订单吗？');
+          const el = document.getElementById('confirmResult');
+          el.textContent = 'confirm结果:' + r;
+          el.hidden = false;
+        });
+        document.getElementById('btnPrompt').addEventListener('click', function () {
+          const r = prompt('请输入优惠码', 'DEFAULT2026');
+          const el = document.getElementById('promptResult');
+          el.textContent = 'prompt结果:' + String(r);
+          el.hidden = false;
+        });
+      })();
+    </script>
+  </body>
+</html>
