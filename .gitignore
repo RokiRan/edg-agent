@@ -19,8 +19,10 @@ pnpm-debug.log*
 !.env.example
 
 # ── WXT / 构建产物 ─────────────────────────────────────────────────
-.output/         # wxt build 产物（含 .zip 发行包）
-.wxt/            # wxt 生成的 .wxt/types 和 wxt.d.ts
+# .output/ = wxt build 产物（含 .zip 发行包）；.wxt/ = 生成的 types 和 wxt.d.ts
+# （gitignore 不支持行内注释，注释必须独立成行，否则 pattern 不匹配）
+.output/
+.wxt/
 dist/
 build/
 out/
@@ -35,7 +37,8 @@ wxt.config.ts.bak
 # 例外：源码里如果未来引入静态资源 zip 可在此加 !pattern
 
 # ── E2E / 测试产物 ─────────────────────────────────────────────────
-/tmp/edg-e2e-ext          # e2e/prepare-ext.mjs 拷贝的临时扩展目录
+# /tmp/edg-e2e-ext = e2e/prepare-ext.mjs 拷贝的临时扩展目录
+/tmp/edg-e2e-ext
 coverage/
 .nyc_output/
 *.lcov
