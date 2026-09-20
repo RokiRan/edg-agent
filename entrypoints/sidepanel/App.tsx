@@ -2,8 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
 import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
+import { ATTACH_ACCEPT, extractAttachmentText } from '../../lib/fileExtract';
 import { runAgentTask, type AgentStep, type AgentContinuation, type PriorTurn } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
+import { MemoryPanel } from './MemoryPanel';
 import { Markdown } from './Markdown';
 
 type SettingsForm = {
@@ -131,6 +133,10 @@ function App() {
   const [pendingAsk, setPendingAsk] = useState<AskState | null>(null);
   /** 最近一次 agent 任务的 token 用量（footer 显示；新任务开始时清零）。 */
   const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
+  /** 待随任务发送的本地附件（xlsx/docx 解析文本）；发送后清空。 */
+  const [attachment, setAttachment] = useState<{ name: string; text: string } | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const attachInputRef = useRef<HTMLInputElement | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   // 任务进行中的用户补充指令队列：loop 每步开头取出注入对话历史（不打断任务）
@@ -142,6 +148,18 @@ function App() {
   // 「本次会话始终允许」：仅内存态，侧栏重开即失效
   const alwaysAllowRiskRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  /** 附件选择回调：立即解析为文本，失败时展示原因。 */
+  const onAttachPicked = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const text = await extractAttachmentText(file);
+      setAttachment({ name: file.name, text });
+      setAttachError(null);
+    } catch (err) {
+      setAttachment(null);
+      setAttachError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -379,10 +397,15 @@ function App() {
       return;
     }
 
+    // 附件：LLM 文本（含解析内容）与 UI 展示文本（只带文件名标记）分开构造，单处拼接
+    const attach = attachment;
+    const messageText = attach ? `${trimmed}\n\n附件 ${attach.name} 的内容:\n${attach.text}` : trimmed;
+    const displayText = attach ? `${trimmed}\n📎 ${attach.name}` : trimmed;
+
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: trimmed,
+      content: displayText,
     };
     const assistantId = crypto.randomUUID();
     const assistantMsg: ChatMessage = {
@@ -392,6 +415,8 @@ function App() {
     };
 
     setInput('');
+    setAttachment(null);
+    setAttachError(null);
 
     const settings: LLMSettings | null = currentSettings();
 
@@ -423,7 +448,7 @@ function App() {
         content: '',
       };
       setMessages((prev) => [...prev, userMsg, agentMsg]);
-      await runAgent(assistantId, trimmed, settings, undefined, buildPriorTurns());
+      await runAgent(assistantId, messageText, settings, undefined, buildPriorTurns());
       return;
     }
 
@@ -438,7 +463,7 @@ function App() {
       role: m.role,
       content: m.content,
     }));
-    history.push({ role: 'user', content: trimmed });
+    history.push({ role: 'user', content: messageText });
 
     try {
       await streamChat(
@@ -590,6 +615,7 @@ function App() {
           onChange={setSettingsForm}
           onProviderChange={handleProviderChange}
           onSave={handleSaveSettings}
+          memoryPanel={<MemoryPanel />}
         />
       ) : (
         <>
@@ -637,7 +663,58 @@ function App() {
 
           {/* Input area */}
           <footer className="shrink-0 border-t border-[#1d232c] bg-[#0e1218] p-3">
+            <input
+              ref={attachInputRef}
+              type="file"
+              accept={ATTACH_ACCEPT}
+              data-edg-attach="1"
+              className="hidden"
+              onChange={(e) => {
+                void onAttachPicked(e.target.files?.[0]);
+                e.target.value = '';
+              }}
+            />
+            {(attachment || attachError) && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-[#2a3340] bg-[#11151c] px-2.5 py-1.5 text-xs" data-edg-attachment="1">
+                {attachment ? (
+                  <>
+                    <span className="text-amber-300">📎 {attachment.name}</span>
+                    <span className="text-[#4d5766]">{attachment.text.length} 字符</span>
+                    <button
+                      type="button"
+                      aria-label="移除附件"
+                      onClick={() => setAttachment(null)}
+                      className="ml-auto text-[#5d6675] transition hover:text-red-400"
+                    >
+                      ✕
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-red-400">附件解析失败: {attachError}</span>
+                    <button
+                      type="button"
+                      aria-label="关闭错误"
+                      onClick={() => setAttachError(null)}
+                      className="ml-auto text-[#5d6675] transition hover:text-red-400"
+                    >
+                      ✕
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             <div className="flex items-end gap-2">
+              <button
+                  type="button"
+                  aria-label="添加附件"
+                  title="附加本地 Excel / Word 文件（.xlsx / .xls / .docx），内容随任务发送"
+                  disabled={isStreaming}
+                  onClick={() => attachInputRef.current?.click()}
+                  className="flex h-10 shrink-0 items-center rounded-lg border border-[#2a3340] bg-[#11151c] px-3 text-sm text-[#e6e9ee] transition hover:border-amber-400/60 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  📎
+                </button>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -1079,6 +1156,7 @@ type SettingsPanelProps = {
   onChange: (next: SettingsForm) => void;
   onProviderChange: (provider: LLMProvider) => void;
   onSave: () => void;
+  memoryPanel?: React.ReactNode;
 };
 
 const FIELD_CLS =
@@ -1086,7 +1164,7 @@ const FIELD_CLS =
 const LABEL_CLS =
   'font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-[#5d6675]';
 
-function SettingsPanel({ form, onChange, onProviderChange, onSave }: SettingsPanelProps) {
+function SettingsPanel({ form, onChange, onProviderChange, onSave, memoryPanel }: SettingsPanelProps) {
   const presetEntries = Object.entries(PROVIDER_PRESETS) as Array<[LLMProvider, { label: string }]>;
 
   return (
@@ -1167,6 +1245,8 @@ function SettingsPanel({ form, onChange, onProviderChange, onSave }: SettingsPan
             </label>
           </div>
         </div>
+
+        {memoryPanel}
 
         <button
           type="button"

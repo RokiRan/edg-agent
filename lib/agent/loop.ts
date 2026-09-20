@@ -12,6 +12,13 @@ import {
 import { getTargetTabId } from './targetTab';
 import { buildSystemPrompt, buildSnapshotMessage } from './prompt';
 import {
+  loadMemory,
+  saveMemory,
+  mergeMemory,
+  domainFromUrl,
+  formatMemoryForPrompt,
+} from '../memory';
+import {
   cdpClick,
   cdpInsertText,
   cdpWheel,
@@ -351,6 +358,9 @@ function dangerReason(
   return '该操作可能产生实际后果，请确认无误后再继续。';
 }
 
+/** 用户显式要求记忆的信号词（命中则跳过页面动作数门槛，直接提炼） */
+const REMEMBER_HINT_RE = /记住|记一下|别忘了|remember/i;
+
 /**
  * 主入口：浏览器操作代理循环。
  */
@@ -368,6 +378,9 @@ export async function runAgentTask(
   lastPageError = null;
 
   consecutiveFail = 0;
+  /** 记忆提炼触发闸状态：页面动作计数 + 用户显式「记住」信号 */
+  let pageActionCount = 0;
+  let rememberHint = REMEMBER_HINT_RE.test(task);
   const resume = opts?.resume;
   const totalUsage: ChatUsage = resume ? { ...resume.usage } : { prompt: 0, completion: 0 };
 
@@ -388,6 +401,7 @@ export async function runAgentTask(
     tabId = resolvedTabId;
   }
   const targetTab = await chrome.tabs.get(tabId);
+  const taskDomain = domainFromUrl(targetTab.url ?? '');
   if (!/^https?:\/\//.test(targetTab.url ?? '')) {
     return {
       status: 'failed',
@@ -437,6 +451,17 @@ export async function runAgentTask(
           .join('\n')}`
       : '';
 
+  // 长期记忆注入：仅新任务首轮（续跑沿用原 system prompt，不重取）。
+  // 记忆读取失败静默降级为无记忆，不阻塞任务。
+  let memoryBlock: string | null = null;
+  if (!resume) {
+    try {
+      memoryBlock = formatMemoryForPrompt(await loadMemory(), taskDomain);
+    } catch {
+      memoryBlock = null;
+    }
+  }
+
   const messages: OutgoingMessage[] = resume
     ? [
         // 续跑：完整历史 + 一条「继续」指令和最新快照（页面可能已变化，旧元素 id 作废）
@@ -447,7 +472,7 @@ export async function runAgentTask(
         },
       ]
     : [
-        { role: 'system', content: buildSystemPrompt() },
+        { role: 'system', content: buildSystemPrompt(memoryBlock) },
         {
           role: 'user',
           content: `任务: ${task}${historyNote}\n\n${buildSnapshotMessage(snapshot, { pageText: true })}`,
@@ -462,11 +487,66 @@ export async function runAgentTask(
         role: 'user',
         content: `用户插话: ${text}\n（以上是用户在任务进行中补充的指令。请结合当前页面状态继续推进任务；若与原任务冲突，以最新指令为准。）`,
       });
+      if (REMEMBER_HINT_RE.test(text)) rememberHint = true;
     }
     if (steers.length > 0) {
       onStep({ tool: 'steer', args: { text: steers.join(' | ') }, ok: true, info: `已接收 ${steers.length} 条用户补充指令` });
     }
     return steers.length;
+  };
+
+  /**
+   * 任务结束后的记忆提炼：追加一轮 LLM 请求，把本次任务可复用的信息
+   * （用户事实 facts / 本站操作经验 siteTips）合并入库。
+   * 触发闸（防废话污染）：页面动作 ≥2 次，或用户显式说了「记住」类指令——
+   * 纯聊天/一次性查询任务不触发，零额外成本。
+   * 提炼失败（LLM 报错、输出非 JSON、全部判空）一律静默，绝不影响主结果。
+   */
+  const distillMemory = async (finalStatus: 'done' | 'max-steps'): Promise<void> => {
+    if (pageActionCount < 2 && !rememberHint) return;
+    try {
+      const resp = await chat(
+        settings,
+        [
+          ...messages,
+          {
+            role: 'user',
+            content: [
+              `任务已结束（状态: ${finalStatus === 'done' ? '完成' : '达到最大步数'}）。回顾上面的整个任务过程，提取值得长期记住的信息。`,
+              '',
+              '只输出一个 JSON 对象：{"facts":["..."],"siteTips":["..."]}',
+              '- facts：用户事实/偏好，跨任务可复用（如「发票抬头是XX公司」「常用收货地址是XX」）。',
+              `- siteTips：当前网站（${taskDomain ?? '未知站点'}）的操作经验，下次在这个站执行类似任务能少走弯路（如「搜索框要先点放大镜图标才会出现」「下拉框要先点触发器再点选项」）。`,
+              '- 只记跨任务可复用的信息；本次任务的一次性内容（如「这次填了3条数据」）不要记。',
+              '- 绝不记录密码、身份证号、银行卡号等敏感信息。',
+              '- 没有值得记的信息是常见情况，输出 {"facts":[],"siteTips":[]} 即可。',
+              '- 除 JSON 外不要输出任何文字。',
+            ].join('\n'),
+          },
+        ],
+        signal,
+      );
+      if (resp.usage) {
+        totalUsage.prompt += resp.usage.prompt;
+        totalUsage.completion += resp.usage.completion;
+      }
+      const jsonStr = extractJson(resp.content);
+      if (!jsonStr) return;
+      const parsed = JSON.parse(jsonStr) as { facts?: unknown; siteTips?: unknown };
+      const store = await loadMemory();
+      const { added } = mergeMemory(
+        store,
+        { facts: parsed.facts as string[], siteTips: parsed.siteTips as string[] },
+        taskDomain,
+        task.slice(0, 60),
+      );
+      if (added > 0) {
+        await saveMemory(store);
+        onStep({ tool: 'memory', args: {}, ok: true, info: `已记住 ${added} 条新信息（可在设置-记忆中查看/编辑）` });
+      }
+    } catch {
+      // 提炼是附属动作：任何失败都不影响任务结果
+    }
   };
 
   let lastSummary = '';
@@ -542,6 +622,7 @@ export async function runAgentTask(
         const summary = `${salvaged}\n\n（模型输出达到长度上限被截断，以上内容可能不完整，可发「继续」让我补全）`;
         lastSummary = summary;
         onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
+        await distillMemory('done');
         return { status: 'done', summary, usage: totalUsage };
       }
       consecutiveFormatErrors++;
@@ -911,6 +992,7 @@ export async function runAgentTask(
       lastSummary = summary;
       onStep({ tool, args: argsForStep, ok: true, info: summary });
       safeHideOverlay(tabId);
+      await distillMemory('done');
       return { status: 'done', summary, usage: totalUsage };
     } else {
       ok = false;
@@ -928,6 +1010,7 @@ export async function runAgentTask(
       tool === 'type_focused' ||
       tool === 'upload'
     ) {
+      pageActionCount++;
       if (ok) {
         consecutiveFail = 0;
       } else {
@@ -982,6 +1065,7 @@ export async function runAgentTask(
 
   await safeCdpDetach(tabId);
   safeHideOverlay(tabId);
+  await distillMemory('max-steps');
   return {
     status: 'max-steps',
     summary: lastSummary || `已达最大步数 ${maxSteps}`,

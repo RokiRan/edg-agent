@@ -22,6 +22,15 @@ let sawDialog = 0;
 let sawAutoAlert = false;
 // 见到「页面有未应答的原生对话框」拦截闸（故意发错动作触发）
 let sawDialogGuard = false;
+// 批量录入测试：mock 每发一次「提交」点击 +1（期望 = 任务数据行数）
+let sawEntry = 0;
+// 记忆测试：收到提炼请求（末条 user 含「提取值得长期记住的信息」）+1
+let sawDistill = 0;
+// 记忆测试：system prompt 带记忆段（「已知事实」）的请求数（用计数而非布尔锁存，
+//  runner 按前后差值断言，mock 进程跨多次运行不复位也不影响）
+let sawMemoryInjection = 0;
+// 每次请求的 body 字节数（≈ 完整 prompt 体积，含 system+历史+快照），用于 token 消耗分析
+const reqBytes = [];
 
 // --- Helpers ---
 
@@ -102,6 +111,38 @@ function decideAction(messages) {
   const firstUserText = userMessages.length > 0 ? msgText(userMessages[0]) : '';
   const taskLine = (firstUserText.match(/^任务: ([^\n]+)/m) || [])[1] || '';
 
+  // 记忆提炼轮：loop 在 done/max-steps 后追加的请求，末条 user 含固定标记。
+  // 返回固定 JSON（注意：不是动作对象，无 tool 字段），loop 解析后合并入库。
+  if (last.includes('提取值得长期记住的信息')) {
+    sawDistill += 1;
+    return {
+      facts: ['用户公司的发票抬头是「示例科技有限公司」'],
+      siteTips: ['搜索框要先点击放大镜图标再输入'],
+    };
+  }
+  // 记忆场景：任务含「记忆测试」— 走 search.html 的搜索流程（type 关键词 +
+  // click 搜索按钮 = 2 次页面动作，凑够提炼门槛）后 done，触发提炼轮；
+  // 第二次任务时 system prompt 应已注入记忆段（sawMemoryInjection）。
+  // 动作选择与 buildSearchReply 同构（e2e 已验证 click/type 路径；scroll 的
+  // CDP 轮子路径无 runner 覆盖，不用它凑数）。
+  if (taskLine.includes('记忆测试')) {
+    // 不用「结果1: hello」当终态信号：第二次任务的首轮消息带正文摘录，
+    // 里面残留上次搜索的结果文本，会误判成已完成。按 results 计数分流即可。
+    if (results === 0) {
+      const m = last.match(/^\[(\d+)\] input[^\n]*placeholder="请输入关键词"/m);
+      if (!m) {
+        console.log('[mock] 记忆测试 regex miss; last user msg:\n' + last.slice(0, 800));
+        return { tool: 'done', summary: '记忆测试：找不到搜索输入框' };
+      }
+      return { tool: 'type', id: Number(m[1]), text: 'hello' };
+    }
+    if (results === 1) {
+      const m = last.match(/^\[(\d+)\] button[^\n]*"搜索"/m);
+      if (!m) return { tool: 'done', summary: '记忆测试：找不到搜索按钮' };
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return { tool: 'done', summary: '记忆测试完成' };
+  }
   if (taskLine.includes('插话测试')) {
     const steerMsg = userMessages.map((m) => msgText(m)).find((t) => t.includes('用户插话:'));
     if (steerMsg) {
@@ -120,6 +161,35 @@ function decideAction(messages) {
   }
   if (taskLine.includes('慢响应')) {
     return { tool: 'done', summary: '慢响应完成', __delay: 20000 };
+  }
+  // 批量录入场景：任务含「批量录入测试」— 数据来自 sidepanel 附件解析块
+  // （首条 user 消息内「附件 xxx 的内容:\n」之后、「页面:」快照之前的 CSV 风格行）。
+  // 每行 4 步：type 姓名 → type 部门 → type 电话 → click 提交；全部行完成后 done。
+  // 模拟「本地 Excel 附件 → 逐条填进 web 表单并提交」的重复性输入循环。
+  if (taskLine.includes('批量录入测试')) {
+    const dataMatch = firstUserText.match(/的内容:\n([\s\S]+?)\n\n页面: /);
+    if (!dataMatch) return { tool: 'done', summary: '批量录入测试：任务里找不到附件内容块' };
+    const rows = dataMatch[1]
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.includes(', '))
+      .map((l) => l.split(', ').map((x) => x.trim()));
+    const perRow = 4;
+    if (results < rows.length * perRow) {
+      const step = results % perRow;
+      const row = rows[Math.floor(results / perRow)];
+      if (step < 3) {
+        const ph = ['姓名', '部门', '电话'][step];
+        const m = last.match(new RegExp(`^\\[(\\d+)\\] input[^\\n]*placeholder="${ph}"`, 'm'));
+        if (!m) return { tool: 'done', summary: `批量录入测试：快照中找不到${ph}输入框` };
+        return { tool: 'type', id: Number(m[1]), text: row[step] };
+      }
+      const m = last.match(/^\[(\d+)\] button[^\n]*"提交"/m);
+      if (!m) return { tool: 'done', summary: '批量录入测试：快照中找不到提交按钮' };
+      sawEntry += 1;
+      return { tool: 'click', id: Number(m[1]) };
+    }
+    return { tool: 'done', summary: `批量录入完成，共 ${rows.length} 条` };
   }
   // 对话框场景：任务含「对话框测试」— 状态机按 last 内容推进（short-circuit 消息
   // 不含快照，results 计数不可靠，不能按步数分流）：
@@ -414,9 +484,17 @@ const server = http.createServer((req, res) => {
         return;
       }
       reqCount += 1;
+            reqBytes.push(Buffer.byteLength(raw));
       const msgs = body && Array.isArray(body.messages) ? body.messages : [];
       if (!sawImage && msgs.some(hasImagePart)) sawImage = true;
+      if (msgs.some((m) => m && m.role === 'system' && msgText(m).includes('已知事实'))) {
+        sawMemoryInjection += 1;
+      }
       const stream = body && body.stream === true;
+      const taskM = msgText(msgs.find((m) => m && m.role === 'user') || '').match(/^任务: ([^\n]+)/m);
+      const lastU = msgs.filter((m) => m && m.role === 'user').pop();
+      const isDistill = lastU && msgText(lastU).includes('提取值得长期记住的信息');
+      console.log(`[mock] req#${reqCount} ${Buffer.byteLength(raw)}B task=${taskM ? taskM[1] : '(none)'}${isDistill ? ' [distill]' : ''} users=${msgs.filter((m) => m && m.role === 'user').length}`);
       const action = decideAction(msgs);
       if (action && typeof action.__delay === 'number') {
         await new Promise((r) => setTimeout(r, action.__delay));
@@ -442,7 +520,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/__stats') {
-    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard });
+    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard, sawEntry, sawDistill, sawMemoryInjection, reqBytes });
     return;
   }
 

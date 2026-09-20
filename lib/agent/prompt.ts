@@ -3,9 +3,11 @@ import type { PageSnapshot } from './actions';
 /**
  * 构造浏览器操作助手的 system prompt。
  * 契约要求使用中文，并明确：每轮只输出一个 JSON 动作对象、不要多余文字。
+ * memoryBlock：长期记忆段（lib/memory.ts formatMemoryForPrompt 产出），
+ * 有记忆时追加在末尾；无记忆（null/undefined）时 prompt 逐字不变。
  */
-export function buildSystemPrompt(): string {
-  return [
+export function buildSystemPrompt(memoryBlock?: string | null): string {
+  const lines = [
     '你是 Edg Agent，一个能在用户浏览器里执行网页操作的助手。',
     '',
     '工作方式：',
@@ -55,7 +57,15 @@ export function buildSystemPrompt(): string {
     '- confirm（确认框）：读清消息内容，与任务目标一致才 accept；涉及删除/支付/发送等不可逆操作且任务没有明确要求时 dismiss。',
     '- prompt（输入框）：用 text 提供输入内容后 accept；dismiss 等价于用户点取消。',
     '- 对话框未应答时页面处于冻结状态，其它工具都会失败；收到「页面弹出对话框」消息后下一步必须先用 dialog 工具应答。',
-  ].join('\n');
+  ];
+  if (memoryBlock) {
+    lines.push(
+      '',
+      '记忆（此前任务积累的长期信息，与当前任务相关时可参考；与页面现状冲突时以页面为准）：',
+      memoryBlock,
+    );
+  }
+  return lines.join('\n');
 }
 
 
