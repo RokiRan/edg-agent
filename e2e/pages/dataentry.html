@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>批量录入测试页</title>
+</head>
+<body>
+  <h1>员工信息录入</h1>
+  <form id="entry-form" onsubmit="return false">
+    <label>姓名 <input id="f-name" type="text" placeholder="姓名"></label>
+    <label>部门 <input id="f-dept" type="text" placeholder="部门"></label>
+    <label>电话 <input id="f-phone" type="text" placeholder="电话"></label>
+    <button id="f-submit" type="button">提交</button>
+  </form>
+  <table border="1">
+    <thead><tr><th>姓名</th><th>部门</th><th>电话</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <pre id="log"></pre>
+  <script>
+    (function () {
+      var name = document.getElementById('f-name');
+      var dept = document.getElementById('f-dept');
+      var phone = document.getElementById('f-phone');
+      var rows = document.getElementById('rows');
+      var log = document.getElementById('log');
+      document.getElementById('f-submit').addEventListener('click', function () {
+        if (!name.value) return;
+        var tr = document.createElement('tr');
+        [name.value, dept.value, phone.value].forEach(function (v) {
+          var td = document.createElement('td');
+          td.textContent = v;
+          tr.appendChild(td);
+        });
+        rows.appendChild(tr);
+        log.textContent += '已提交: ' + name.value + '\n';
+        name.value = '';
+        dept.value = '';
+        phone.value = '';
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -9,10 +9,12 @@
     "prepare": "wxt prepare"
   },
   "dependencies": {
+    "mammoth": "^1.12.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.8",
