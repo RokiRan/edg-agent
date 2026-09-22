@@ -716,12 +716,51 @@ export async function edgAct(tool: string, args: EdgActArgs): Promise<{ ok: bool
       htmlEl instanceof HTMLTextAreaElement
     ) {
       htmlEl.focus();
-      return { ok: true, editable: true, tag, info: `typed "${text}" into <${tag}>` };
+      // 清空已有内容：CDP insertText 是光标处插入，不清空会新旧拼接。
+      // 用原生 setter 置 ''，保证 React 受控组件也能收到值变更通知。
+      let clearedNote = '';
+      if (htmlEl.value !== '') {
+        const oldVal = htmlEl.value;
+        const proto =
+          htmlEl instanceof HTMLTextAreaElement
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) {
+          desc.set.call(htmlEl, '');
+        } else {
+          htmlEl.value = '';
+        }
+        htmlEl.dispatchEvent(new Event('input', { bubbles: true }));
+        htmlEl.dispatchEvent(new Event('change', { bubbles: true }));
+        const prev = oldVal.length > 20 ? oldVal.slice(0, 20) + '…' : oldVal;
+        clearedNote = ` (cleared "${prev}")`;
+      }
+      return {
+        ok: true,
+        editable: true,
+        tag,
+        info: `typed "${text}" into <${tag}>${clearedNote}`,
+      };
     }
     const ceAttr = htmlEl.getAttribute('contenteditable');
     if (ceAttr === '' || ceAttr === 'true') {
       htmlEl.focus();
-      return { ok: true, editable: true, tag, info: `typed "${text}" into contenteditable <${tag}>` };
+      // 清空已有 innerText：CDP insertText 不会替换 contenteditable 已有内容。
+      let clearedNote = '';
+      const oldInner = htmlEl.innerText;
+      if (oldInner && oldInner.trim() !== '') {
+        htmlEl.innerText = '';
+        htmlEl.dispatchEvent(new Event('input', { bubbles: true }));
+        const prev = oldInner.length > 20 ? oldInner.slice(0, 20) + '…' : oldInner;
+        clearedNote = ` (cleared "${prev}")`;
+      }
+      return {
+        ok: true,
+        editable: true,
+        tag,
+        info: `typed "${text}" into contenteditable <${tag}>${clearedNote}`,
+      };
     }
     return { ok: false, info: `unsupported element type <${tag}>` };
   }
