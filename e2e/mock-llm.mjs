@@ -29,6 +29,11 @@ let sawDistill = 0;
 // 记忆测试：system prompt 带记忆段（「已知事实」）的请求数（用计数而非布尔锁存，
 //  runner 按前后差值断言，mock 进程跨多次运行不复位也不影响）
 let sawMemoryInjection = 0;
+// 快路径测试：/v1/systemone（Jev mock）总调用数；快路径测试场景的调用序计数；
+// 选中元素 id（即快路径直执点击、绕过 LLM）的次数
+let sawJev = 0;
+let sawJevSearch = 0;
+let sawJevClick = 0;
 // 每次请求的 body 字节数（≈ 完整 prompt 体积，含 system+历史+快照），用于 token 消耗分析
 const reqBytes = [];
 
@@ -519,8 +524,52 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Jev mock：POST /v1/systemone。任务含「快路径测试」时按调用序分流
+  // （与 buildSearchReply 的 results 计数同构）：第 1 次（输入步，需生成文本）
+  // → _llm 回退大模型；第 2 次 → 选中快照里的「搜索」按钮（高置信直执，
+  // 验证快路径绕过 LLM）；第 3 次起 → _llm（done 的 summary 只能大模型写）。
+  if (req.method === 'POST' && url.pathname === '/v1/systemone') {
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        writeJson(res, 400, { error: { message: 'invalid JSON body' } });
+        return;
+      }
+      sawJev += 1;
+      const state = body && body.state && typeof body.state === 'object' ? body.state : {};
+      const task = typeof state.task === 'string' ? state.task : '';
+      const snapshot = typeof state.snapshot === 'string' ? state.snapshot : '';
+      let choice = '_llm';
+      if (task.includes('快路径测试')) {
+        sawJevSearch += 1;
+        if (sawJevSearch === 2) {
+          const m = snapshot.match(/\[(\d+)\] button[^\n]*"搜索"/);
+          if (m) {
+            choice = m[1];
+            sawJevClick += 1;
+          }
+        }
+      }
+      writeJson(res, 200, {
+        model: 'jev-mock',
+        answers: {
+          next: { type: 'choice', choice, probabilities: { [choice]: 0.9 }, confidence: 0.9 },
+          task_done: { type: 'noul', noul: 0.05 },
+        },
+        usage: { input_tokens: Math.ceil(raw.length / 4), output_tokens: 20 },
+      });
+    });
+    req.on('error', () => {});
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/__stats') {
-    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard, sawEntry, sawDistill, sawMemoryInjection, reqBytes });
+    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard, sawEntry, sawDistill, sawMemoryInjection, sawJev, sawJevClick, reqBytes });
     return;
   }
 

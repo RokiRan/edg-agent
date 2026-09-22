@@ -14,6 +14,9 @@ type SettingsForm = {
   baseUrl: string;
   model: string;
   maxSteps: string;
+  jevEnabled: boolean;
+  jevKey: string;
+  jevBaseUrl: string;
 };
 
 type ConfirmState = {
@@ -126,6 +129,9 @@ function App() {
     baseUrl: PROVIDER_PRESETS.openai.baseUrl,
     model: PROVIDER_PRESETS.openai.model,
     maxSteps: String(DEFAULT_MAX_STEPS),
+    jevEnabled: false,
+    jevKey: '',
+    jevBaseUrl: '',
   });
   const [hydrated, setHydrated] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
@@ -173,6 +179,9 @@ function App() {
           baseUrl: saved.baseUrl,
           model: saved.model,
           maxSteps: String(saved.maxSteps ?? DEFAULT_MAX_STEPS),
+          jevEnabled: saved.jevEnabled ?? false,
+          jevKey: saved.jevKey ?? '',
+          jevBaseUrl: saved.jevBaseUrl ?? '',
         });
       }
       setAgentMode(mode);
@@ -211,6 +220,9 @@ function App() {
       baseUrl: settingsForm.baseUrl,
       model: settingsForm.model,
       maxSteps: parseMaxSteps(settingsForm.maxSteps),
+      jevEnabled: settingsForm.jevEnabled,
+      jevKey: settingsForm.jevKey.trim() || undefined,
+      jevBaseUrl: settingsForm.jevBaseUrl.trim() || undefined,
     };
     await saveSettings(payload);
     setSettingsForm((prev) => ({ ...prev, maxSteps: String(payload.maxSteps) }));
@@ -229,6 +241,28 @@ function App() {
       );
     }
   };
+  /** 新会话：中止进行中的流/任务，清空消息与全部会话态；运行清理交给 abort 后的 finally。 */
+  const handleNewSession = () => {
+    abortRef.current?.abort();
+    setMessages([]);
+    setInput('');
+    setAttachment(null);
+    setAttachError(null);
+    setLastUsage(null);
+    // 挂起的确认/提问必须先拒绝式解决，否则 loop 永远等 resolve，isStreaming 卡死
+    setPendingConfirm((cur) => {
+      cur?.resolve(false);
+      return null;
+    });
+    setPendingAsk((cur) => {
+      cur?.resolve('');
+      return null;
+    });
+    continuationRef.current = null;
+    steerQueueRef.current = [];
+    currentAgentMsgIdRef.current = null;
+    alwaysAllowRiskRef.current = false;
+  };
 
   const updateAssistant = (id: string, updater: (m: ChatMessage) => ChatMessage) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? updater(m) : m)));
@@ -244,6 +278,9 @@ function App() {
       baseUrl: settingsForm.baseUrl,
       model: settingsForm.model,
       maxSteps: parseMaxSteps(settingsForm.maxSteps),
+      jevEnabled: settingsForm.jevEnabled,
+      jevKey: settingsForm.jevKey.trim() || undefined,
+      jevBaseUrl: settingsForm.jevBaseUrl.trim() || undefined,
     };
   };
 
@@ -535,7 +572,8 @@ function App() {
       {/* Top bar */}
       <header className="flex shrink-0 items-center justify-between border-b border-[#1d232c] bg-[#0e1218] px-3.5 py-2.5">
         <div className="flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-400 shadow-[0_0_14px_rgba(251,191,36,0.35)]">
+          {/* 与扩展图标同一枚 logo：黄渐变圆角方块 + 深色闪电（public/icons 同源） */}
+          <div className="flex h-6 w-6 items-center justify-center rounded-[7px] shadow-[0_0_14px_rgba(251,191,36,0.35)] [background:linear-gradient(180deg,#fcd34d,#f59e0b)]">
             <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
               <path
                 d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"
@@ -550,6 +588,29 @@ function App() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* 新会话：清空当前对话与任务态 */}
+          <button
+            type="button"
+            aria-label="新会话"
+            title="新会话"
+            onClick={handleNewSession}
+            className="rounded-md p-1.5 text-[#8b94a3] transition hover:bg-[#1a2028] hover:text-amber-400"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-[18px] w-[18px]"
+            >
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+            </svg>
+          </button>
+
           {/* mode segmented control */}
           <div
             role="group"
@@ -834,19 +895,83 @@ function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResol
     !message.content.startsWith('错误：') &&
     message.content !== '请先在右上角设置中配置 API Key';
 
+  if (isUser) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-amber-400 px-3 py-2 text-sm font-medium text-[#0c0f14]">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  const segments = splitThinking(message.content);
+  const plainError =
+    message.content.startsWith('错误：') || message.content === '请先在右上角设置中配置 API Key';
+
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={
-          isUser
-            ? 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-amber-400 px-3 py-2 text-sm font-medium text-[#0c0f14]'
-            : 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md border border-[#232b36] bg-[#161b23] px-3 py-2 text-sm text-[#e6e9ee]'
-        }
-      >
-        {/* 流式分支保持纯文本：半截 token 可能带着未闭合的 ** 或 ```，交给 <Markdown> 会把后续输出全吞进错误节点。 */}
-        {message.content}
+    <div className="flex justify-start">
+      <div className="max-w-[85%] break-words rounded-2xl rounded-bl-md border border-[#232b36] bg-[#161b23] px-3 py-2 text-sm text-[#e6e9ee]">
+        {/* 错误/配置提示保持纯文本；正文按段渲染：think 段折叠，其余走 Markdown。
+            流式期间半截的加粗/代码块标记可能让 Markdown 短暂误包后续输出，
+            属可接受的瞬时态，完成后重新解析即恢复。 */}
+        {plainError ? (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        ) : (
+          segments.map((seg, idx) =>
+            seg.kind === 'think' ? (
+              <ThinkBlock key={idx} content={seg.text} streaming={streaming && seg.open} />
+            ) : (
+              <Markdown key={idx} content={seg.text} />
+            ),
+          )
+        )}
         {showCursor && <span className="edg-cursor ml-0.5 inline-block text-amber-400">▍</span>}
       </div>
+    </div>
+  );
+}
+
+type ContentSegment = { kind: 'text' | 'think'; text: string; open?: boolean };
+
+/** 把聊天回复拆成 think/正文段：<think>…</think> 完整成段；未闭合的 <think>（流式中或截断）其后全部视为思考。 */
+function splitThinking(content: string): ContentSegment[] {
+  const segments: ContentSegment[] = [];
+  const re = /<think>([\s\S]*?)(<\/think>|$)/gi;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content))) {
+    const before = content.slice(last, m.index).trim();
+    if (before) segments.push({ kind: 'text', text: before });
+    const body = m[1].trim();
+    if (body || m[2]) segments.push({ kind: 'think', text: body, open: !m[2] });
+    last = m.index + m[0].length;
+  }
+  const rest = content.slice(last).trim();
+  if (rest) segments.push({ kind: 'text', text: rest });
+  if (segments.length === 0 && content) segments.push({ kind: 'text', text: content });
+  return segments;
+}
+
+/** 折叠的思考段：默认收起为一行摘要，点击展开全文。 */
+function ThinkBlock({ content, streaming }: { content: string; streaming?: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-1.5 rounded-md border border-[#1d232c] bg-[#0f131a] last:mb-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2 py-1 text-left font-mono text-[10px] uppercase tracking-[0.14em] text-[#5d6675] transition hover:text-[#8b94a3]"
+      >
+        <span className={`inline-block transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
+        <span>思考过程</span>
+        {streaming && <span className="edg-cursor text-amber-400">▍</span>}
+      </button>
+      {open && (
+        <div className="max-h-[200px] overflow-y-auto whitespace-pre-wrap break-words border-t border-[#1d232c] px-2 py-1.5 text-xs leading-relaxed text-[#8b94a3]">
+          {content}
+        </div>
+      )}
     </div>
   );
 }
@@ -1219,6 +1344,51 @@ function SettingsPanel({ form, onChange, onProviderChange, onSave, memoryPanel }
                 onChange={(e) => onChange({ ...form, model: e.target.value })}
                 className={FIELD_CLS}
               />
+            </label>
+          </div>
+        </div>
+
+        <div className="border-t border-[#1d232c] pt-4">
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/90">
+            fast path · jev（可选）
+          </h2>
+          <div className="mt-3 flex flex-col gap-3.5">
+            <label className="flex cursor-pointer items-center gap-2.5">
+              <input
+                type="checkbox"
+                checked={form.jevEnabled}
+                onChange={(e) => onChange({ ...form, jevEnabled: e.target.checked })}
+                className="h-4 w-4 accent-amber-400"
+              />
+              <span className="text-sm text-[#e6e9ee]">启用 Jev 快路径</span>
+            </label>
+
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>Jev API Key</span>
+              <input
+                type="password"
+                value={form.jevKey}
+                onChange={(e) => onChange({ ...form, jevKey: e.target.value })}
+                autoComplete="off"
+                placeholder="留空则关闭快路径"
+                className={FIELD_CLS}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1.5">
+              <span className={LABEL_CLS}>Jev Base URL</span>
+              <input
+                type="text"
+                value={form.jevBaseUrl}
+                onChange={(e) => onChange({ ...form, jevBaseUrl: e.target.value })}
+                placeholder="https://api.typesafe.ai/v1"
+                className={FIELD_CLS}
+              />
+              <span className="text-[11px] leading-relaxed text-[#5d6675]">
+                开启并配置 key 后，每步先用 Jev 小模型做动作决策：高置信（≥0.7）的点击/滚动直接执行（亚秒级），
+                低置信、需生成文本或动作打转时回退上方大模型。高危确认闸不变。
+                每一步的卡片上可见分流标注：[jev conf=…] = 快路径直执；[jev→llm …] = 评估后回退大模型。
+              </span>
             </label>
           </div>
         </div>

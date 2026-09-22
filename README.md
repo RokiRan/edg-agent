@@ -22,6 +22,9 @@ Edg Agent 是一个基于 WXT + React 19 + TypeScript 构建的 Chrome MV3 扩�
 - **多步无缝续跑** — 触达 `max-steps` 上限不直接失败，沿用完整对话历史在同卡片内继续。
 - **Token 遥测** — 每步累积 prompt / completion 用量在 footer 显示，Snap 体积 O(n²)→O(n) 剪枝。
 - **高危操作二次确认** — `tabs.executeScript`、`chrome.permissions.request` 等可勾选"本次会话始终允许"。
+- **遮挡感知快照** — 被弹窗/遮罩盖住的元素不进快照（`elementFromPoint` 判定，模拟人眼只看最上层）：列表页上开大表单弹层时，底层列表的搜索表单不再干扰动作选择。
+- **标号徽标随快照重绘** — 页面上的元素编号徽标用绝对定位（随内容滚动），每次快照重绘并只画当前可见层元素，编号永不脱节。
+- **Jev 快路径（可选，独立开关）** — 设置里勾选「启用 Jev 快路径」并配置 TypeSafe Jev（System One）key 后，每步先由小模型做动作决策：高置信（≥0.7）的点击/滚动亚秒级直执，低置信、需生成文本或动作打转时回退大模型；步骤卡片可见分流标注（`[jev conf=…]` 直执 / `[jev→llm …]` 回退）。默认关闭，不启用则完全走原 LLM 循环，行为不变。
 
 ## 架构
 
@@ -158,6 +161,7 @@ Agent 循环位于 [lib/agent/loop.ts](lib/agent/loop.ts)，核心契约：
 - **历史剪枝**：快照消息只保留最近 2 份完整内容，更早的改写为占位符，prompt 体积 O(n²)→O(n)。
 - **文件上传**：快照给 file input 标注 `accept=`；LLM 发 `{"tool":"upload","id":N,"paths":[...]}`，后台用已附加的 `chrome.debugger` 执行 `DOM.setFileInputFiles`（浏览器进程读盘，扩展不碰文件内容）。三条路径：(a) 可见 file input 直接注入；(b) 「选择文件」类按钮走 `Page.setInterceptFileChooserDialog` 拦截 + 喂隐藏 input；(c) 纯拖拽区（无 file input）走影子 `<input data-edg-shadow>` + 合成 `dragenter/dragover/drop` 事件。三条都过同一道高危确认闸。实现特殊的拖拽区（如 DataTransfer 自定义 items、自定义 `drop` 处理函数）才退化 `ask_user` 请用户手动拖入。
 
+
 ## E2E 测试
 
 测试用纯 Node（≥20）写的 mock LLM，零外部依赖。`mock-llm.mjs` 是确定性状态机假 LLM（127.0.0.1:4399，按任务行关键词 + 步数分流）。
@@ -193,6 +197,21 @@ node e2e/run-upload.mjs
 五项断言：`#log1` / `#log2` / `#log3` 含 `edg-upload-fixture.txt`、mock `/__stats sawUpload === 3`、任务终态 `done`。
 
 `upload.html` 含可见 file input（id=file1）、按钮触发隐藏 file input（包在 `<form id="triggerForm">` 内，`findFileInput` 走 form 回退）、纯拖拽区 `<div class="dropzone">`（快照 candidates 含 `[class*="dropzone"]`，走影子 input + 合成 drop 事件）。Mock LLM 上传场景按任务行含「上传测试」+ 步数分流：results=0 → upload 可见 input；results=1 → upload「选择文件」按钮；results=2 → upload 拖拽区；results>=3 → done。
+
+### Jev 快路径（端到端）
+
+`e2e/run-jev.mjs`：搜索流程（type → click → done）下验证快路径分流——mock 的
+`/v1/systemone` 端点按调用序返回 `_llm`（输入步/收尾步）或高置信元素 id（点击步）。
+
+```bash
+npm run build && node e2e/prepare-ext.mjs
+node e2e/mock-llm.mjs &
+node e2e/run-jev.mjs
+```
+
+断言：任务 done、页面 3 条结果、`/__stats sawJev ≥ 3`（每步一扇出）、
+`sawJevClick = 1`（点击步绕过 LLM 直执）、侧边栏步骤行带 `[jev conf=…]` 标注。
+解耦回归：`run-upload.mjs`（不配置 jevKey）全程零 `/v1/systemone` 调用。
 
 ### 已知 gap
 

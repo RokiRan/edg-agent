@@ -1,4 +1,5 @@
 import { chat, type ChatUsage, OutgoingMessage } from '../llm';
+import { jevFastPath, jevActionKey, JEV_CONFIDENCE_MIN, JEV_MAX_OPTIONS } from './jev';
 import {
   domSnapshot,
   showOverlay,
@@ -360,6 +361,11 @@ function dangerReason(
 
 /** 用户显式要求记忆的信号词（命中则跳过页面动作数门槛，直接提炼） */
 const REMEMBER_HINT_RE = /记住|记一下|别忘了|remember/i;
+/** 页面签名：URL + 元素 id/tag/text 摘要。快路径打转熔断用——只用来判「页面无变化」，
+ *  误判的最坏结果是快路径提前禁用、回退 LLM（安全方向），宁可粗不可漏。 */
+function pageSignature(snap: PageSnapshot): string {
+  return `${snap.url}|${snap.elements.map((e) => `${e.id}:${e.tag}:${(e.text ?? '').slice(0, 24)}`).join(',')}`;
+}
 
 /**
  * 主入口：浏览器操作代理循环。
@@ -550,6 +556,15 @@ export async function runAgentTask(
   };
 
   let lastSummary = '';
+  /** 本任务已快路径执行过的动作键。用元素身份（tag+text）而非快照 id：
+   *  id 随页面渲染漂移（实证：同一「新增人员」按钮 52→54），id 键会漏掉隔步重复。 */
+  const jevUsedKeys = new Set<string>();
+  /** 快路径执行后页面签名（URL+元素 id 序列）未变的次数；≥2 判定打转，
+   *  本任务剩余步骤整体禁用快路径（表单填写类任务 Jev 帮不上忙，及时止损）。 */
+  let jevStuck = 0;
+  let jevDisabled = false;
+  /** 最近 3 步的执行摘要（喂给 Jev 当上下文：知道「浮层已打开」才会去选 option） */
+  const jevRecent: string[] = [];
   let consecutiveFormatErrors = 0;
   /** 最近一次 chat 的 finish_reason，格式错误终态诊断用 */
   let lastFinishReason: string | undefined;
@@ -558,7 +573,7 @@ export async function runAgentTask(
     try {
       throwIfAborted(signal);
       // 步首吸收用户进行中的补充指令（不打断任务，注入对话历史）
-      drainSteering();
+      const steerCount = drainSteering();
 
     // 视觉兜底：连续失败 >=2 时，先发一张截图提示 LLM 用坐标动作
     if (consecutiveFail >= 2) {
@@ -588,28 +603,64 @@ export async function runAgentTask(
       }
     }
 
-    let raw: string;
-    try {
-      // 格式错误后的重试：加大 token 预算兜住推理模型的长 think，
-      // 温度非零打破 temperature:0 下两次重试输出完全相同的死局
-      const isFormatRetry = consecutiveFormatErrors > 0;
-      const resp = await chat(settings, messages, signal, {
-        maxTokens: isFormatRetry ? 8192 : undefined,
-        temperature: isFormatRetry ? 0.2 : undefined,
-      });
-      raw = resp.content;
-      lastFinishReason = resp.finishReason;
-      if (resp.usage) {
-        totalUsage.prompt += resp.usage.prompt;
-        totalUsage.completion += resp.usage.completion;
+    // Jev 快路径（可选，配置了 jevKey 才启用）：先用小模型对当前快照做动作决策，
+    // 一次 HTTP 扇出拿「下一动作 + done 判定」。仅页面状态干净时启用：本步无
+    // 用户插话（新指令可能改变任务方向）、无冻结对话框、元素数在 Choice 上限内。
+    // 低置信/需生成文本/调用失败 → jevAction 为 null，走下方大模型路径，行为不变。
+    let jevAction: { tool: 'click'; id: number } | { tool: 'scroll'; direction: 'down' | 'up' } | null = null;
+    let jevNote = '';
+    let jevSigBefore = '';
+    if (
+      settings.jevEnabled && settings.jevKey &&
+      !jevDisabled &&
+      steerCount === 0 &&
+      !peekPendingDialog(tabId) &&
+      snapshot.elements.length > 0 &&
+      snapshot.elements.length <= JEV_MAX_OPTIONS
+    ) {
+      const verdict = await jevFastPath(settings.jevKey, settings.jevBaseUrl, task, snapshot, signal, jevRecent);
+      if (verdict) {
+        const key = jevActionKey(verdict.action, snapshot);
+        if (verdict.action && verdict.confidence >= JEV_CONFIDENCE_MIN && !jevUsedKeys.has(key)) {
+          jevAction = verdict.action;
+          jevUsedKeys.add(key);
+          jevSigBefore = pageSignature(snapshot);
+          jevNote = `[jev conf=${verdict.confidence.toFixed(2)} done=${verdict.taskDone !== null ? verdict.taskDone.toFixed(2) : '?'} ${verdict.ms}ms] `;
+        } else {
+          // 回退也留痕：让用户看得见「Jev 评估过但升级给了大模型」及原因信号
+          const why = !verdict.action ? `choice=${verdict.choice}` : verdict.confidence < JEV_CONFIDENCE_MIN ? `低置信` : '重复动作';
+          jevNote = `[jev→llm ${why} conf=${verdict.confidence.toFixed(2)} ${verdict.ms}ms] `;
+        }
       }
-    } catch (err) {
-      // 中止触发的 fetch abort 不是业务失败——交给外层 stopped 出口
-      if (err instanceof AbortedError || signal?.aborted) throw err instanceof AbortedError ? err : new AbortedError();
-      await safeCdpDetach(tabId);
-      safeHideOverlay(tabId);
-      const msg = err instanceof Error ? err.message : String(err);
-      return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage };
+    }
+
+    let raw: string;
+    if (jevAction) {
+      // 快路径命中：动作 JSON 直接进入下方统一的解析/高危闸/执行管线
+      raw = JSON.stringify(jevAction);
+    } else {
+      try {
+        // 格式错误后的重试：加大 token 预算兜住推理模型的长 think，
+        // 温度非零打破 temperature:0 下两次重试输出完全相同的死局
+        const isFormatRetry = consecutiveFormatErrors > 0;
+        const resp = await chat(settings, messages, signal, {
+          maxTokens: isFormatRetry ? 8192 : undefined,
+          temperature: isFormatRetry ? 0.2 : undefined,
+        });
+        raw = resp.content;
+        lastFinishReason = resp.finishReason;
+        if (resp.usage) {
+          totalUsage.prompt += resp.usage.prompt;
+          totalUsage.completion += resp.usage.completion;
+        }
+      } catch (err) {
+        // 中止触发的 fetch abort 不是业务失败——交给外层 stopped 出口
+        if (err instanceof AbortedError || signal?.aborted) throw err instanceof AbortedError ? err : new AbortedError();
+        await safeCdpDetach(tabId);
+        safeHideOverlay(tabId);
+        const msg = err instanceof Error ? err.message : String(err);
+        return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage };
+      }
     }
     const json = extractJson(raw);
     if (!json) {
@@ -1018,7 +1069,9 @@ export async function runAgentTask(
       }
     }
 
-    onStep({ tool, args: argsForStep, ok, info });
+    onStep({ tool, args: argsForStep, ok, info: jevNote + info });
+    jevRecent.push(`${tool}${ok ? '' : '(失败)'}: ${info.slice(0, 80)}`);
+    if (jevRecent.length > 3) jevRecent.shift();
 
     // 自动应答的对话框（alert/beforeunload）不静默吞，message 拼进执行结果给 LLM 观察
     const autoDlgs = drainAutoDialogs(tabId);
@@ -1046,6 +1099,16 @@ export async function runAgentTask(
     }
 
     snapshot = (await runInPage(tabId, domSnapshot, [], signal)) ?? snapshot;
+    // 快路径打转熔断：本步是快路径直执且动作后页面签名没变 → stuck 累计；
+    // 页面有变化则清零。stuck≥2 本任务禁用快路径（jevDisabled 在步首判定）。
+    if (jevAction) {
+      const jevSigAfter = pageSignature(snapshot);
+      jevStuck = jevSigAfter === jevSigBefore ? jevStuck + 1 : 0;
+      if (jevStuck >= 2 && !jevDisabled) {
+        jevDisabled = true;
+        onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off] 快路径连续无进展，本任务剩余步骤已回退全程大模型' });
+      }
+    }
     messages.push({
       role: 'user',
       content: `执行结果: ${ok ? info : `失败 - ${info}`}${autoNote}\n\n最新页面:\n\n${buildSnapshotMessage(snapshot)}`,

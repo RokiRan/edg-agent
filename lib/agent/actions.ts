@@ -72,6 +72,19 @@ export function domSnapshot(): PageSnapshot {
     const p = window.getComputedStyle(c as HTMLElement).position;
     return p === 'absolute' || p === 'fixed';
   };
+  // 遮挡过滤：人只点得到最上层。被弹窗/遮罩盖住的元素（典型：列表页上开着
+  // 大面积表单弹层时，底层列表的搜索表单）不应进快照——实测会严重干扰动作选择。
+  // 判定：元素与视口交集的中心点 elementFromPoint 命中自身/子孙/祖先 = 未被遮挡；
+  // 完全在视口外的元素无法命中，保留（滚动可及）。
+  const notOccluded = (el: HTMLElement): boolean => {
+    const r = el.getBoundingClientRect();
+    const ix = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
+    const iy = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+    if (ix <= 0 || iy <= 0) return true;
+    const hit = document.elementFromPoint(Math.max(r.left, 0) + ix / 2, Math.max(r.top, 0) + iy / 2);
+    if (!hit) return true;
+    return hit === el || el.contains(hit) || hit.contains(el);
+  };
 
   let nextId = 1;
   const seen = new Set<HTMLElement>();
@@ -85,6 +98,7 @@ export function domSnapshot(): PageSnapshot {
     if (rects.length === 0) continue;
     const cs = window.getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    if (!notOccluded(el)) continue;
 
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute('role');
@@ -153,6 +167,43 @@ export function domSnapshot(): PageSnapshot {
       if (t.length <= 300) break;
     }
   }
+  // 标号徽标随每次快照重绘：data-edg-id 每步清掉重编号，旧徽标必须同步失效，
+  // 否则第 2 步起页面上的编号就与快照脱节（实测页面越跑越乱的根源之一）。
+  // 注意：本函数会被 executeScript 单独序列化注入，必须自包含——徽标绘制
+  // 只能内联在这里，不能引用模块级 drawEdgBadges（页面侧会是未定义）。
+  {
+    const old = document.getElementById('edg-overlay-root');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    const root = document.createElement('div');
+    root.id = 'edg-overlay-root';
+    root.style.position = 'absolute';
+    root.style.left = '0';
+    root.style.top = '0';
+    root.style.width = '0';
+    root.style.height = '0';
+    root.style.zIndex = '2147483647';
+    root.style.pointerEvents = 'none';
+    for (const info of elements) {
+      const el = document.querySelector(`[data-edg-id="${info.id}"]`) as HTMLElement | null;
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      const badge = document.createElement('div');
+      badge.textContent = String(info.id);
+      badge.style.position = 'absolute';
+      badge.style.left = `${Math.round(rect.left + window.scrollX)}px`;
+      badge.style.top = `${Math.round(rect.top + window.scrollY)}px`;
+      badge.style.background = '#2563eb';
+      badge.style.color = '#fff';
+      badge.style.font = '11px monospace';
+      badge.style.padding = '0 3px';
+      badge.style.borderRadius = '3px';
+      badge.style.lineHeight = '14px';
+      badge.style.pointerEvents = 'none';
+      root.appendChild(badge);
+    }
+    document.documentElement.appendChild(root);
+  }
 
   return {
     url: location.href,
@@ -164,12 +215,20 @@ export function domSnapshot(): PageSnapshot {
 }
 
 
+/**
+ * showOverlay：任务首轮显式画一次标号（domSnapshot 已内联重绘，这里是幂等补充）。
+ * 自包含约束与 domSnapshot 相同：executeScript 只序列化本函数，不携带模块级引用。
+ */
 export function showOverlay(): void {
-  { const old = document.getElementById('edg-overlay-root'); if (old && old.parentNode) old.parentNode.removeChild(old); }
+  const old = document.getElementById('edg-overlay-root');
+  if (old && old.parentNode) old.parentNode.removeChild(old);
   const root = document.createElement('div');
   root.id = 'edg-overlay-root';
-  root.style.position = 'fixed';
-  root.style.inset = '0';
+  root.style.position = 'absolute';
+  root.style.left = '0';
+  root.style.top = '0';
+  root.style.width = '0';
+  root.style.height = '0';
   root.style.zIndex = '2147483647';
   root.style.pointerEvents = 'none';
 
@@ -181,9 +240,9 @@ export function showOverlay(): void {
     if (rect.width === 0 && rect.height === 0) return;
     const badge = document.createElement('div');
     badge.textContent = id;
-    badge.style.position = 'fixed';
-    badge.style.left = `${Math.round(rect.left)}px`;
-    badge.style.top = `${Math.round(rect.top)}px`;
+    badge.style.position = 'absolute';
+    badge.style.left = `${Math.round(rect.left + window.scrollX)}px`;
+    badge.style.top = `${Math.round(rect.top + window.scrollY)}px`;
     badge.style.background = '#2563eb';
     badge.style.color = '#fff';
     badge.style.font = '11px monospace';
