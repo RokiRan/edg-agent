@@ -38,6 +38,25 @@ import {
 } from './cdp';
 import type { LLMSettings } from '../types';
 
+/** Jev 快路径健康状态（统一所有「关闭」原因）：
+ *  - ok：正常启用
+ *  - stuck：连续两次动作后页面签名不变（打转）
+ *  - null-streak：连续三次 HTTP 返回 verdict==null
+ *  - cross-domain：动作把页面带到了任务起点域外（含跨子域到登录前置）
+ *  - off：用户未启用或任务已结束
+ *  任意非 ok 状态都会在本次任务剩余步骤里禁用 Jev（jevDisabled=true）。 */
+export type JevHealth = 'ok' | 'stuck' | 'null-streak' | 'cross-domain' | 'off';
+
+/** 导航漂移确认请求的三种决策。 */
+export type NavDecision = 'back' | 'continue' | 'abort';
+
+/** 跨域导航漂移的 UI 确认请求（AgentHandlers.onNavConfirmRequired 的入参）。 */
+export interface NavConfirmRequest {
+  reason: string;
+  fromUrl: string;
+  toUrl: string;
+  options: Array<{ id: NavDecision; label: string }>;
+}
 /** 注入函数 edgAct 的返回值（含 CDP prep 分支的额外字段）。 */
 type EdgActResult = { ok: boolean; info: string; [k: string]: unknown };
 export interface AgentStep {
@@ -73,6 +92,9 @@ export interface AgentHandlers {
   onTargetTab?: (tab: TargetTabInfo) => void;
   /** 拉取用户在任务进行中补充的指令队列（取出即清空，注入对话历史）。 */
   getSteering?: () => string[];
+  /** 跨域导航漂移时向用户索取三选一决策（返回 / 继续 / 中止）。
+   *  返回 'abort' 会让 loop 走 stopped 出口；'continue' 会把任务起点域改为新域；'back' 会调 chrome.tabs.goBack。 */
+  onNavConfirmRequired?: (req: NavConfirmRequest) => Promise<NavDecision>;
   signal?: AbortSignal;
 }
 
@@ -86,6 +108,8 @@ export interface AgentResult {
   /** 本任务是否发生过 Jev HTTP 调用（即便被快路径回退大模型、usage 字段为 0 也为 true）——
    *  sidepanel 据此决定是否显示 Jev 用量行。 */
   jevCalled: boolean;
+  /** Jev 健康状态终值；sidepanel 暂未读取此字段，留给后续 UI 闭环使用。 */
+  jevHealth: JevHealth;
   /** status 为 max-steps 时携带：完整对话历史 + 目标标签页，用于无缝续跑 */
   continuation?: AgentContinuation;
 }
@@ -99,6 +123,10 @@ export interface AgentContinuation {
   jevUsage: ChatUsage;
   /** 续跑点携带此前是否调用过 Jev。 */
   jevCalled: boolean;
+  /** 续跑点携带当前任务起点域（eTLD+1）；nav-confirm 在跨域时拿来比对。 */
+  taskOriginHost: string;
+  /** 续跑点携带 Jev 健康状态；loop 端保守按 'cross-domain' 处理缺字段。 */
+  jevHealth: JevHealth;
 }
 
 /** 契约定义的高危关键词正则。 */
@@ -432,17 +460,47 @@ function dangerReason(
   }
   return '该操作可能产生实际后果，请确认无误后再继续。';
 }
-
 /** 用户显式要求记忆的信号词（命中则跳过页面动作数门槛，直接提炼） */
 const REMEMBER_HINT_RE = /记住|记一下|别忘了|remember/i;
-/** 页面签名：URL + 元素 id/tag/text 摘要。快路径打转熔断用——只用来判「页面无变化」，
+/** 简化 eTLD+1：取 host 最后两段小写作为「公共后缀+1」。
+  *  不接 publicsuffix 库——接受 .co.uk/.com.cn 等多段 TLD 误判为跨域（少见，多段 TLD 的真跨域站极少）。 */
+export function eTLD1(host: string): string {
+  const parts = host.toLowerCase().split('.').filter(Boolean);
+  if (parts.length >= 2) return parts.slice(-2).join('.');
+  return host.toLowerCase() || '';
+}
+/** 常见登录/鉴权路径前缀——跨子域落到这些路径默认当「前置登录」处理（同站跨子域保守熔断 Jev）。 */
+const LOGIN_PATH_RE = /^\/(?:login|signin|sso|oauth|auth|accounts?|signup|register)(?:\/|$)/i;
+export interface NavCheck {
+  kind: 'same' | 'cross-subdomain-login' | 'cross-domain';
+  fromHost: string;
+  toHost: string;
+  fromPath: string;
+  toPath: string;
+  fromEtld1: string;
+  toEtld1: string;
+}
+/** 比较两 URL 之间的导航形态：
+ *  - same：完全相同 host
+ *  - cross-subdomain-login：eTLD+1 一致但 host 不同——按登录前置保守处理
+ *  - cross-domain：eTLD+1 不同——弹 nav-confirm 让用户三选一 */
+export function checkNav(fromUrl: string, toUrl: string): NavCheck {
+  const a = new URL(fromUrl); const b = new URL(toUrl);
+  const same = a.hostname === b.hostname;
+  const sameEtld1 = eTLD1(a.hostname) === eTLD1(b.hostname);
+  let kind: NavCheck['kind'];
+  if (same) kind = 'same';
+  else if (sameEtld1 && LOGIN_PATH_RE.test(b.pathname)) kind = 'cross-subdomain-login';
+  else if (sameEtld1) kind = 'cross-subdomain-login';
+  else kind = 'cross-domain';
+  return { kind, fromHost: a.hostname, toHost: b.hostname, fromPath: a.pathname, toPath: b.pathname, fromEtld1: eTLD1(a.hostname), toEtld1: eTLD1(b.hostname) };
+}
+/** 页面签名：URL + 元素 id/tag/text 摘要。快路径打转熔断用——只用来判「页面无变化」,
  *  误判的最坏结果是快路径提前禁用、回退 LLM（安全方向），宁可粗不可漏。 */
 function pageSignature(snap: PageSnapshot): string {
   return `${snap.url}|${snap.elements.map((e) => `${e.id}:${e.tag}:${(e.text ?? '').slice(0, 24)}`).join(',')}`;
 }
-
-/**
- * 主入口：浏览器操作代理循环。
+/** 主入口：浏览器操作代理循环。
  */
 export async function runAgentTask(
   task: string,
@@ -468,6 +526,15 @@ export async function runAgentTask(
   /** 本任务是否发生过 Jev HTTP 调用（一旦 jevFastPath 返回非 null 即置 true）。
    *  续跑时从 resume.jevCalled 接力——此前调用过就一直保留。 */
   let jevCalled: boolean = resume ? resume.jevCalled : false;
+  /** Jev 健康状态（统一所有「关闭」原因）。续跑接力；新任务基于 jevEnabled/jevKey 决定 ok 还是 off。
+   *  resume 缺字段（老版本续跑）保守按 'cross-domain' 处理——禁用 Jev 比误启用更安全。 */
+  let jevHealth: JevHealth = resume
+    ? (resume.jevHealth ?? 'cross-domain')
+    : (settings.jevEnabled && settings.jevKey ? 'ok' : 'off');
+  /** 任务起点域（eTLD+1）。续跑接力；新任务取当前 tab URL 的 eTLD+1（snapshot 拿到后再用 snapshot.url 校正）。 */
+  let taskOriginHost: string = (resume && resume.taskOriginHost) ? resume.taskOriginHost : '';
+  /** 上一步的页面 URL——跨域判定用「上一步 URL → 当前 step URL」。 */
+  let lastNavUrl: string = '';
 
   let tabId: number;
   if (resume) {
@@ -476,12 +543,12 @@ export async function runAgentTask(
     try {
       await chrome.tabs.get(tabId);
     } catch {
-      return { status: 'failed', summary: '原标签页已关闭，无法继续任务', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+      return { status: 'failed', summary: '原标签页已关闭，无法继续任务', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
     }
   } else {
     const resolvedTabId = await getTargetTabId();
     if (resolvedTabId === null) {
-      return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+      return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
     }
     tabId = resolvedTabId;
   }
@@ -492,6 +559,7 @@ export async function runAgentTask(
       status: 'failed',
       summary: '当前页面不支持自动化（chrome://、新建标签页、应用商店等页面不可用），请切换到普通网页后再试',
       usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+      jevHealth,
     };
   }
 
@@ -518,6 +586,7 @@ export async function runAgentTask(
       status: 'failed',
       summary: isPerm ? '没有页面访问权限，请点击允许后重试' : `页面操作失败: ${errMsg.slice(0, 200)}`,
       usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+      jevHealth,
     };
   }
   await runInPage<unknown>(tabId, showOverlay, [], signal);
@@ -662,6 +731,76 @@ export async function runAgentTask(
       // 步首吸收用户进行中的补充指令（不打断任务，注入对话历史）
       const steerCount = drainSteering();
 
+    // 导航漂移检测：每步拿到新 snapshot 后、决策动作前，比对「上一步 URL → 当前 URL」。
+    //  - 同站跨子域（含登录前置）：只熔断 jevHealth，不弹窗（用户已接受该子域）
+    //  - 真跨域：弹 nav-confirm 三选项（返回 / 继续 / 中止）
+    // 跨子域到登录 → 同步把 jevHealth 转 'cross-domain'（loop 端自检，不靠 UI）。
+    if (step > 0 && lastNavUrl && snapshot.url) {
+      const nav = checkNav(lastNavUrl, snapshot.url);
+      if (nav.kind === 'cross-subdomain-login') {
+        // 同站跨子域：保守熔断 Jev，标注 onStep，不弹窗
+        if (jevHealth === 'ok') {
+          jevHealth = 'cross-domain';
+          jevDisabled = true;
+          onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off cross-domain] 检测到同站跨子域导航（疑似登录前置），Jev 已禁用' });
+        }
+      } else if (nav.kind === 'cross-domain' && taskOriginHost && nav.toEtld1 !== taskOriginHost) {
+        // 真跨域且未在用户「继续」后采纳——询问用户三选一
+        if (handlers.onNavConfirmRequired) {
+          const req: NavConfirmRequest = {
+            reason: `任务起点域 ${taskOriginHost}，但操作把页面带到了 ${nav.toEtld1}。是否回退 / 接受新域继续 / 直接中止？`,
+            fromUrl: lastNavUrl,
+            toUrl: snapshot.url,
+            options: [
+              { id: 'back', label: '返回上一页' },
+              { id: 'continue', label: '接受新域继续' },
+              { id: 'abort', label: '中止任务' },
+            ],
+          };
+          let decision: NavDecision = 'back';
+          try {
+            decision = await abortable(handlers.onNavConfirmRequired(req), signal);
+          } catch (err) {
+            if (err instanceof AbortedError) throw err;
+            decision = 'back';
+          }
+          if (decision === 'abort') {
+            await safeCdpDetach(tabId);
+            safeHideOverlay(tabId);
+            return { status: 'stopped', summary: '用户中止：导航漂移', usage: totalUsage, jevUsage: totalJevUsage, jevCalled, jevHealth };
+          }
+          if (decision === 'continue') {
+            taskOriginHost = nav.toEtld1;
+            onStep({ tool: 'nav', args: { decision }, ok: true, info: `已接受新任务起点域 ${taskOriginHost}` });
+          } else {
+            // back：调 goBack + 等 2s + 重新拿 snapshot。若仍在跨域，next step 会再弹一次（最多背一次）。
+            await new Promise<void>((resolve) => {
+              chrome.tabs.goBack(tabId, () => { void chrome.runtime.lastError; resolve(); });
+            });
+            const { promise: sleepP, resolve: sleepR } = Promise.withResolvers<void>();
+            setTimeout(sleepR, 2000);
+            await sleepP;
+            const fresh = await runInPage<PageSnapshot>(tabId, domSnapshot, [], signal);
+            if (fresh) snapshot = fresh;
+            onStep({ tool: 'nav', args: { decision }, ok: true, info: '已尝试返回上一页；如仍在跨域，下一步会再次询问' });
+          }
+        } else {
+          // 没有 UI 处理函数 = 旧调用方：保守按 cross-domain 熔断 Jev（j evHealth + jevDisabled），
+          // 任务继续但不弹窗。taskOriginHost 不动。
+          if (jevHealth === 'ok') {
+            jevHealth = 'cross-domain';
+            jevDisabled = true;
+            onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off cross-domain] 检测到跨域导航（无 nav-confirm handler），Jev 已禁用' });
+          }
+        }
+      }
+      lastNavUrl = snapshot.url;
+    } else if (step === 0 && snapshot.url) {
+      // 首步：把 lastNavUrl 初始化为当前 URL，下次比对才有起点
+      lastNavUrl = snapshot.url;
+      if (!taskOriginHost) taskOriginHost = eTLD1(new URL(snapshot.url).hostname);
+    }
+
     // 视觉兜底：连续失败 >=2 时，先发一张截图提示 LLM 用坐标动作
     if (consecutiveFail >= 2) {
       const snapshotText = buildSnapshotMessage(snapshot);
@@ -697,6 +836,7 @@ export async function runAgentTask(
     let jevAction: { tool: 'click'; id: number } | { tool: 'scroll'; direction: 'down' | 'up' } | null = null;
     let jevNote = '';
     let jevSigBefore = '';
+    let jevNullStreak = 0; // 局部：本次循环累计 null verdict 次数，达到 3 → null-streak
     if (
       settings.jevEnabled && settings.jevKey &&
       !jevDisabled &&
@@ -723,6 +863,15 @@ export async function runAgentTask(
           // 回退也留痕：让用户看得见「Jev 评估过但升级给了大模型」及原因信号
           const why = !verdict.action ? `choice=${verdict.choice}` : verdict.confidence < JEV_CONFIDENCE_MIN ? `低置信` : '重复动作';
           jevNote = `[jev→llm ${why} conf=${verdict.confidence.toFixed(2)} ${verdict.ms}ms] `;
+        }
+      } else {
+        // verdict === null（HTTP 失败 / 超时 / 形状不符）：累计一次 null streak。
+        // 连续 3 次 → 状态机转 'null-streak'，Jev 禁用，标注 onStep。
+        jevNullStreak++;
+        if (jevNullStreak >= 3 && jevHealth === 'ok') {
+          jevHealth = 'null-streak';
+          jevDisabled = true;
+          onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off null-streak] Jev 连续 3 次返回 null（HTTP/形状失败），本任务剩余步骤回退大模型' });
         }
       }
     }
@@ -752,7 +901,7 @@ export async function runAgentTask(
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
         const msg = err instanceof Error ? err.message : String(err);
-        return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+        return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
       }
     }
     const json = extractJson(raw);
@@ -769,7 +918,7 @@ export async function runAgentTask(
         lastSummary = summary;
         onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
         await distillMemory('done');
-        return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+        return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
       }
       // 失败分类：先识别可早退/可特殊路径的形状，再走通用重试。
       const classification = classifyFailure(raw);
@@ -783,6 +932,7 @@ export async function runAgentTask(
           status: 'failed',
           summary: `模型拒绝执行: ${body.replace(/\s+/g, ' ').slice(0, 120)}`,
           usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+        jevHealth,
         };
       }
       // think-only：剥掉 <think> 后无 JSON。走专用重试 prompt 跳过思考过程；
@@ -795,8 +945,10 @@ export async function runAgentTask(
           safeHideOverlay(tabId);
           return {
             status: 'failed',
-            summary: '模型连续输出思考内容但未给出动作 JSON（推理模型与当前 API 格式可能不兼容，建议换模型或在设置中调整）',
+            summary: `模型在 ${snapshot.url} 连续未给出动作（任务起点域 ${taskOriginHost || '未知'}），可能页面已偏离任务目标。` +
+              '（推理模型与当前 API 格式可能不兼容，建议换模型或在设置中调整）',
             usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+          jevHealth,
           };
         }
         // 占位替换 raw：不再把整段 think 灌回历史污染下轮；保留分类器之前看到的形状供下轮诊断。
@@ -823,6 +975,7 @@ export async function runAgentTask(
           status: 'failed',
           summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
           usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+        jevHealth,
         };
       }
       continue;
@@ -848,6 +1001,7 @@ export async function runAgentTask(
           status: 'failed',
           summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
           usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
+        jevHealth,
         };
       }
       continue;
@@ -892,7 +1046,7 @@ export async function runAgentTask(
       if (!allowed) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+        return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
       }
     }
 
@@ -1195,7 +1349,7 @@ export async function runAgentTask(
       onStep({ tool, args: argsForStep, ok: true, info: summary });
       safeHideOverlay(tabId);
       await distillMemory('done');
-      return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+      return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
     } else {
       ok = false;
       info = `unknown tool ${tool}`;
@@ -1257,7 +1411,22 @@ export async function runAgentTask(
       jevStuck = jevSigAfter === jevSigBefore ? jevStuck + 1 : 0;
       if (jevStuck >= 2 && !jevDisabled) {
         jevDisabled = true;
-        onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off] 快路径连续无进展，本任务剩余步骤已回退全程大模型' });
+        if (jevHealth === 'ok') jevHealth = 'stuck';
+        onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off stuck] 快路径连续无进展，本任务剩余步骤已回退全程大模型' });
+      }
+      // Jev 跨域熔断：本步 Jev 命中动作后，URL 漂到任务起点域外（含/跨 Subdomain 登录前置）→ 禁用 Jev。
+      // 注：cross-domain 熔断判定只在这里做（避免循环通知）；步首 nav-confirm 检测的是更广义的 URL 漂移（含 LLM/Jev 动作）。
+      if (jevHealth === 'ok') {
+        const nav = checkNav(jevSigBefore ? lastNavUrl : (snapshot.url), snapshot.url);
+        if (nav.kind === 'cross-domain' && taskOriginHost && nav.toEtld1 !== taskOriginHost) {
+          jevHealth = 'cross-domain';
+          jevDisabled = true;
+          onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off cross-domain] Jev 动作把页面带到了任务起点域外，已回退大模型' });
+        } else if (nav.kind === 'cross-subdomain-login') {
+          jevHealth = 'cross-domain';
+          jevDisabled = true;
+          onStep({ tool: 'jev', args: {}, ok: true, info: '[jev→off cross-domain] Jev 动作触发了跨子域登录前置，已回退大模型' });
+        }
       }
     }
     messages.push({
@@ -1271,7 +1440,7 @@ export async function runAgentTask(
       if (err instanceof AbortedError || signal?.aborted) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'stopped', summary: '用户已中止', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
+        return { status: 'stopped', summary: '用户已中止', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled, jevHealth };
       }
       throw err;
     }
@@ -1286,6 +1455,7 @@ export async function runAgentTask(
     usage: totalUsage,
     jevUsage: totalJevUsage,
     jevCalled,
-    continuation: { task, tabId, messages, usage: totalUsage, jevUsage: totalJevUsage, jevCalled },
+    jevHealth,
+    continuation: { task, tabId, messages, usage: totalUsage, jevUsage: totalJevUsage, jevCalled, taskOriginHost, jevHealth },
   };
 }

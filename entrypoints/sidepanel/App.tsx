@@ -3,7 +3,7 @@ import type { ChatMessage, LLMProvider, LLMSettings } from '../../lib/types';
 import { PROVIDER_PRESETS, streamChat, type ChatUsage, OutgoingMessage } from '../../lib/llm';
 import { getSettings, saveSettings } from '../../lib/storage';
 import { ATTACH_ACCEPT, extractAttachmentText } from '../../lib/fileExtract';
-import { runAgentTask, type AgentStep, type AgentContinuation, type PriorTurn } from '../../lib/agent/loop';
+import { runAgentTask, type AgentStep, type AgentContinuation, type PriorTurn, type NavConfirmRequest, type NavDecision } from '../../lib/agent/loop';
 import { ThinkingOrb } from './ThinkingOrb';
 import { MemoryPanel } from './MemoryPanel';
 import { Markdown } from './Markdown';
@@ -32,8 +32,15 @@ type AskState = {
   question: string;
   options?: string[];
 };
-
-const AGENT_MODE_KEY = 'agent_mode';
+/** 跨域导航漂移确认卡片状态：resolve 拿三选项之一。 */
+type NavState = {
+  messageId: string;
+  resolve: (decision: NavDecision) => void;
+  reason: string;
+  fromUrl: string;
+  toUrl: string;
+  options: NavConfirmRequest['options'];
+};
 const DEFAULT_MAX_STEPS = 20;
 
 function parseMaxSteps(raw: string): number {
@@ -46,6 +53,7 @@ function hasChromeStorage(): boolean {
   return typeof chrome !== 'undefined' && !!chrome.storage?.local;
 }
 
+const AGENT_MODE_KEY = 'agent_mode';
 async function loadAgentMode(): Promise<boolean> {
   if (hasChromeStorage()) {
     try {
@@ -137,7 +145,7 @@ function App() {
   const [agentMode, setAgentMode] = useState(true);
   const [pendingConfirm, setPendingConfirm] = useState<ConfirmState | null>(null);
   const [pendingAsk, setPendingAsk] = useState<AskState | null>(null);
-  /** 最近一次 agent 任务的 token 用量（footer 显示；新任务开始时清零）。 */
+  const [pendingNav, setPendingNav] = useState<NavState | null>(null);
   const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
   /** 最近一次 agent 任务的 Jev 用量 + 是否真发生 Jev 调用（footer 显示「Jev 行」用）。 */
   const [lastJev, setLastJev] = useState<{ usage: ChatUsage; called: boolean } | null>(null);
@@ -198,7 +206,7 @@ function App() {
 
   useLayoutEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, isStreaming, pendingConfirm, pendingAsk]);
+  }, [messages, isStreaming, pendingConfirm, pendingAsk, pendingNav]);
 
   const handleAgentModeToggle = (next: boolean) => {
     setAgentMode(next);
@@ -264,7 +272,10 @@ function App() {
       cur?.resolve('');
       return null;
     });
-    continuationRef.current = null;
+    setPendingNav((cur) => {
+      cur?.resolve('abort');
+      return null;
+    });
     steerQueueRef.current = [];
     currentAgentMsgIdRef.current = null;
     alwaysAllowRiskRef.current = false;
@@ -347,7 +358,19 @@ function App() {
             });
             updateAssistant(messageId, (m) => ({ ...m, status: 'waiting' }));
           }),
-      }, { resume, priorTurns });
+        onNavConfirmRequired: (req) =>
+          new Promise<NavDecision>((resolve) => {
+            setPendingNav({
+              messageId,
+              resolve,
+              reason: req.reason,
+              fromUrl: req.fromUrl,
+              toUrl: req.toUrl,
+              options: req.options,
+            });
+            updateAssistant(messageId, (m) => ({ ...m, status: 'waiting' }));
+          }),
+       }, { resume, priorTurns });
 
       const finalStatus: ChatMessage['status'] =
         result.status === 'done'
@@ -398,8 +421,15 @@ function App() {
         }
         return cur;
       });
-    }
-  };
+      setPendingNav((cur) => {
+        if (cur && cur.messageId === messageId) {
+          cur.resolve('abort');
+          return null;
+        }
+        return cur;
+      });
+     }
+   };
 
   /** max-steps 卡片上的「继续」（或输入框发「继续」）：在原消息内无缝接续 */
   const continueRun = (messageId: string) => {
@@ -580,7 +610,14 @@ function App() {
       return null;
     });
   };
-
+  const handleNavResolve = (decision: NavDecision) => {
+    setPendingNav((cur) => {
+      if (!cur) return cur;
+      cur.resolve(decision);
+      updateAssistant(cur.messageId, (m) => ({ ...m, status: 'running' }));
+      return null;
+    });
+  };
   return (
     <div className="flex h-full w-full flex-col bg-[#0c0f14] text-[#e6e9ee]">
       {/* Top bar */}
@@ -724,9 +761,11 @@ function App() {
                   streaming={isStreaming}
                   pendingConfirm={pendingConfirm?.messageId === m.id ? pendingConfirm : null}
                   pendingAsk={pendingAsk?.messageId === m.id ? pendingAsk : null}
+                  pendingNav={pendingNav?.messageId === m.id ? pendingNav : null}
                   onConfirmResolve={handleConfirmResolve}
                   onConfirmAlways={handleConfirmAlways}
                   onAskResolve={handleAskResolve}
+                  onNavResolve={handleNavResolve}
                   onContinue={continueRun}
                 />
               ))}
@@ -899,18 +938,20 @@ type BubbleProps = {
   streaming: boolean;
   pendingConfirm: ConfirmState | null;
   pendingAsk: AskState | null;
+  pendingNav: NavState | null;
   onConfirmResolve: (ok: boolean) => void;
   onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
+  onNavResolve: (decision: NavDecision) => void;
   onContinue: (messageId: string) => void;
 };
 
-function Bubble({ message, streaming, pendingConfirm, pendingAsk, onConfirmResolve, onConfirmAlways, onAskResolve, onContinue }: BubbleProps) {
+function Bubble({ message, streaming, pendingConfirm, pendingAsk, pendingNav, onConfirmResolve, onConfirmAlways, onAskResolve, onNavResolve, onContinue }: BubbleProps) {
   const isUser = message.role === 'user';
   const isAgent = message.kind === 'agent';
 
   if (isAgent) {
-    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} onConfirmResolve={onConfirmResolve} onConfirmAlways={onConfirmAlways} onAskResolve={onAskResolve} onContinue={onContinue} />;
+    return <AgentBubble message={message} pendingConfirm={pendingConfirm} pendingAsk={pendingAsk} pendingNav={pendingNav} onConfirmResolve={onConfirmResolve} onConfirmAlways={onConfirmAlways} onAskResolve={onAskResolve} onNavResolve={onNavResolve} onContinue={onContinue} />;
   }
 
   const showCursor =
@@ -1004,17 +1045,21 @@ function AgentBubble({
   message,
   pendingConfirm,
   pendingAsk,
+  pendingNav,
   onConfirmResolve,
   onConfirmAlways,
   onAskResolve,
+  onNavResolve,
   onContinue,
 }: {
   message: ChatMessage;
   pendingConfirm: ConfirmState | null;
   pendingAsk: AskState | null;
+  pendingNav: NavState | null;
   onConfirmResolve: (ok: boolean) => void;
   onConfirmAlways: () => void;
   onAskResolve: (answer: string) => void;
+  onNavResolve: (decision: NavDecision) => void;
   onContinue: (messageId: string) => void;
 }) {
   const steps = message.steps ?? [];
@@ -1125,6 +1170,16 @@ function AgentBubble({
             onSubmit={(answer) => onAskResolve(answer)}
           />
         )}
+
+        {pendingNav && (
+          <NavConfirmCard
+            reason={pendingNav.reason}
+            fromUrl={pendingNav.fromUrl}
+            toUrl={pendingNav.toUrl}
+            options={pendingNav.options}
+            onResolve={(decision) => onNavResolve(decision)}
+          />
+        )}
       </div>
     </div>
   );
@@ -1221,11 +1276,80 @@ function ConfirmCard({
     </div>
   );
 }
-
+/** 跨域导航漂移三选项确认卡片。
+ *  - 「返回上一页」（默认高亮 = 安全默认）— loop 端调 chrome.tabs.goBack + 等 2s + 重取 snapshot；
+ *  - 「接受新域继续」— loop 端把 taskOriginHost 改成新域（用户已接受漂移）；
+ *  - 「中止任务」— loop 端走 stopped 出口。 */
+function NavConfirmCard({
+  reason,
+  fromUrl,
+  toUrl,
+  options,
+  onResolve,
+}: {
+  reason: string;
+  fromUrl: string;
+  toUrl: string;
+  options: NavConfirmRequest['options'];
+  onResolve: (decision: NavDecision) => void;
+}) {
+  let fromHost = fromUrl;
+  let toHost = toUrl;
+  try { fromHost = new URL(fromUrl).hostname; } catch { /* keep original */ }
+  try { toHost = new URL(toUrl).hostname; } catch { /* keep original */ }
+  const back = options.find((o) => o.id === 'back') ?? { id: 'back', label: '返回上一页' };
+  const cont = options.find((o) => o.id === 'continue') ?? { id: 'continue', label: '接受新域继续' };
+  const abort = options.find((o) => o.id === 'abort') ?? { id: 'abort', label: '中止任务' };
+  return (
+    <div className="mt-2 rounded-lg border border-[#3a2a4a] bg-[#16101e] p-3 text-xs text-[#d6c5e8]" data-testid="nav-confirm-card">
+      <div className="mb-1 flex items-center gap-1.5 font-semibold text-[#c084fc]">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
+          <path d="M2 12a10 10 0 0 1 19.5-3" />
+          <path d="M21.5 12a10 10 0 0 1-19.5 3" />
+          <path d="m19 5 2.5 2.5-2.5 2.5" />
+          <path d="m5 19-2.5-2.5L5 14" />
+        </svg>
+        导航漂移
+      </div>
+      <div className="mb-1.5 leading-relaxed">{reason}</div>
+      <div className="mb-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 font-mono text-[10.5px] text-[#a896c0]">
+        <span className="shrink-0 text-[#5d6675]">起点</span>
+        <span className="truncate" title={fromUrl}>{fromHost}</span>
+        <span className="shrink-0 text-[#5d6675]">当前</span>
+        <span className="truncate text-[#e6c5ff]" title={toUrl}>{toHost}</span>
+      </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button
+          type="button"
+          data-testid="nav-confirm-back"
+          onClick={() => onResolve('back')}
+          className="rounded-md border border-[#3a4452] bg-[#1d232c] px-3 py-1 text-xs font-medium text-[#e6e9ee] transition hover:border-[#4a7ab5] hover:bg-[#252b34]"
+        >
+          {back.label}
+        </button>
+        <button
+          type="button"
+          data-testid="nav-confirm-continue"
+          onClick={() => onResolve('continue')}
+          className="rounded-md border border-[#6b4a8a] bg-[#2a1f3a] px-3 py-1 text-xs font-medium text-[#c084fc] transition hover:border-[#8b5ab5] hover:bg-[#3a2a4a]"
+        >
+          {cont.label}
+        </button>
+        <button
+          type="button"
+          data-testid="nav-confirm-abort"
+          onClick={() => onResolve('abort')}
+          className="rounded-md bg-[#b8475a] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#c45568]"
+        >
+          {abort.label}
+        </button>
+      </div>
+    </div>
+  );
+}
 function AskCard({ question, options, onSubmit }: { question: string; options?: string[]; onSubmit: (answer: string) => void }) {
   const [value, setValue] = useState('');
   const [picked, setPicked] = useState<string | null>(null);
-
   // 选择类问题：选项以按钮组呈现，选中后点确认提交
   if (options && options.length > 0) {
     return (
