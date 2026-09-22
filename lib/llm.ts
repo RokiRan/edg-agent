@@ -16,6 +16,15 @@ export interface ChatResponse {
   /** provider 给的停止原因（stop/length 等）；诊断截断用 */
   finishReason?: string;
   usage?: ChatUsage;
+  /**
+   * 诊断用：推理模型 provider 可能在 message.reasoning_content 通道里写结构化推理
+   * （而 message.content 只放裸 <think> 或直接给 JSON）。loop 端据此推断「
+   * 全部输出塞进推理通道」的指纹——content 为空但 reasoningChars > 0
+   * 时尤其要带上。不要据此决定是否接受结果，只用作终态日志。
+   */
+  reasoningChars?: number;
+  /** provider 响应里原始 message 形状里出现过 reasoning_content 字段（任意类型）。 */
+  reasoning_content?: unknown;
 }
 
 export const PROVIDER_PRESETS: Record<LLMProvider, { label: string; baseUrl: string; model: string }> = {
@@ -148,11 +157,14 @@ export async function chat(
   }
 
   const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>;
+    choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown }; finish_reason?: unknown }>;
     usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
   };
-  const content = data?.choices?.[0]?.message?.content;
+  const message = data?.choices?.[0]?.message;
+  const content = message?.content;
   const finishReason = data?.choices?.[0]?.finish_reason;
+  const reasoningContent = message?.reasoning_content;
+  const reasoningChars = typeof reasoningContent === 'string' ? reasoningContent.length : 0;
   const prompt = Number(data?.usage?.prompt_tokens);
   const completion = Number(data?.usage?.completion_tokens);
   return {
@@ -162,5 +174,7 @@ export async function chat(
       Number.isFinite(prompt) && Number.isFinite(completion)
         ? { prompt, completion }
         : undefined,
+    reasoningChars,
+    reasoning_content: reasoningContent,
   };
 }

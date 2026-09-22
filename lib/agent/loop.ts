@@ -342,6 +342,71 @@ function salvageDoneSummary(raw: string): string | null {
   return inner.length >= 20 ? inner : null;
 }
 
+/**
+ * 失败分类：在 extractJson 返回 null 后判定 raw 是哪一类失败，决定是否早退 / 走专用重试。
+ * refusal 与 think-only 早退/分流；其余归 generic，仍走通用重试路径。
+ * `body` 字段是剥掉 think 后的剩余正文（whitespace 已 normalize），
+ * 用于 refusal 终态摘要与诊断。
+ */
+type FailureKind = 'refusal' | 'think-only' | 'generic';
+type FailureClassification = { kind: FailureKind; body: string };
+
+function classifyFailure(raw: string): FailureClassification {
+  // 与 extractJson 同步的剥离顺序：先闭 think，再剥未闭合 think，剩正文。
+  let body = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  body = body.replace(/<think>[\s\S]*$/gi, '');
+  body = body.replace(/```(?:json)?\s*[\s\S]*?```/gi, '').trim();
+  // refusal：正文以拒绝话术开头（英文/中文常见短语），不烧重试。
+  if (/^(I cannot|I can't|I'm sorry|抱歉|无法|我不能)/i.test(body)) {
+    return { kind: 'refusal', body };
+  }
+  // think-only：剥完 think 后没有任何 JSON 主体信号（无 `{`）——模型光输出思考没动作。
+  if (!body.includes('{')) {
+    return { kind: 'think-only', body };
+  }
+  return { kind: 'generic', body };
+}
+
+/**
+ * 格式错误终态摘要：结构化诊断（think 长度 / 正文长度 / 是否含未闭合 think /
+ * reasoning_chars / finish_reason / 总输出长度），便于在 sidepanel 一眼分辨失败形状。
+ * 前置：raw 是已触发 extractJson==null 或 JSON.parse throw 的原始内容。
+ */
+function formatErrorDiag(
+  raw: string,
+  finishReason: string | undefined,
+  reasoningChars: number | undefined,
+): string {
+  // 与 classifyFailure 同口径剥离 think，估算 thinkLen / bodyLen / unclosedThink。
+  const closedRe = /<think>([\s\S]*?)<\/think>/gi;
+  let thinkLen = 0;
+  let m: RegExpExecArray | null;
+  while ((m = closedRe.exec(raw)) !== null) thinkLen += m[1].length;
+  closedRe.lastIndex = 0;
+  // 未闭合 think：开头 <think> 出现且其后没有 </think>
+  const unclosedThink = /<think>[\s\S]*$/i.test(raw.replace(/<think>[\s\S]*?<\/think>/gi, ''));
+  if (unclosedThink) {
+    const tail = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    const open = tail.indexOf('<think>');
+    if (open >= 0) thinkLen += tail.slice(open + '<think>'.length).length;
+  }
+  let body = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  body = body.replace(/<think>[\s\S]*$/gi, '').trim();
+  // 优先取剥 think 后正文；若为空（例如模型把全部输出塞进 reasoning_content 而 content 是空字符串），
+  // 则回退到 raw 前 120 字符作指纹。
+  const fingerprint = (body.length > 0
+    ? body
+    : raw
+  ).replace(/\s+/g, ' ').slice(0, 120);
+  const diag =
+    `[thinkLen=${thinkLen},bodyLen=${body.length},` +
+    `unclosedThink=${unclosedThink ? 'true' : 'false'},` +
+    `reasoningChars=${reasoningChars ?? '?'},` +
+    `finish_reason=${finishReason ?? '?'},` +
+    `输出长度=${raw.length}]: ${fingerprint}`;
+  return `模型输出格式错误${diag}`;
+}
+
 function dangerReason(
   action: { tool: string; id?: number },
   el: ElInfo | undefined,
@@ -568,6 +633,14 @@ export async function runAgentTask(
   let consecutiveFormatErrors = 0;
   /** 最近一次 chat 的 finish_reason，格式错误终态诊断用 */
   let lastFinishReason: string | undefined;
+  /** 最近一次 chat 的 reasoning_chars（provider 把推理放 reasoning_content 通道的字节数），诊断用 */
+  let lastReasoningChars: number | undefined;
+  /**
+   * 连续 think-only（剥掉 <think> 后无 JSON）次数。
+   * refusal 一律早退不计数；think-only 走专用重试 prompt，
+   * 连续 2 次仍不出 JSON 即终态 failed——再烧一轮只会让上下文越来越脏。
+   */
+  let consecutiveThinkOnly = 0;
 
   for (let step = 0; step < maxSteps; step++) {
     try {
@@ -640,15 +713,15 @@ export async function runAgentTask(
       raw = JSON.stringify(jevAction);
     } else {
       try {
-        // 格式错误后的重试：加大 token 预算兜住推理模型的长 think，
-        // 温度非零打破 temperature:0 下两次重试输出完全相同的死局
-        const isFormatRetry = consecutiveFormatErrors > 0;
-        const resp = await chat(settings, messages, signal, {
-          maxTokens: isFormatRetry ? 8192 : undefined,
-          temperature: isFormatRetry ? 0.2 : undefined,
-        });
+        // 格式错误重试不再升温/升预算：
+        // 旧版用 temperature:0.2 + maxTokens:8192 打破「同 prompt 同温度下重试输出完全相同」的死局，
+        // 前提是回灌的 assistant 历史携带上一轮 raw。但 raw 现在已被占位符
+        // 「[上轮输出无法解析为动作 JSON，已忽略]」替换，上下文已变，再升温只会助长 think 膨胀
+        // 并触发模型继续讨论「格式」。回归 chat() 默认 temperature:0 / maxTokens:4096。
+        const resp = await chat(settings, messages, signal);
         raw = resp.content;
         lastFinishReason = resp.finishReason;
+        if (typeof resp.reasoningChars === 'number') lastReasoningChars = resp.reasoningChars;
         if (resp.usage) {
           totalUsage.prompt += resp.usage.prompt;
           totalUsage.completion += resp.usage.completion;
@@ -666,6 +739,8 @@ export async function runAgentTask(
     if (!json) {
       // 截断形状（done.summary 写到一半未闭合）首轮即救：同预算重试必然再截，
       // 直接抢救省一轮 35-55s 的 LLM 往返；抢救不了（纯 think 垃圾等）才走重试。
+      // 截断优先救：salvageDoneSummary 只能在 format-error 分类之前——
+      // 否则把「剥完 think 后空字符串」也误判成 think-only 会错失 done 抢救。
       const salvaged = salvageDoneSummary(raw);
       if (salvaged) {
         await safeCdpDetach(tabId);
@@ -676,14 +751,59 @@ export async function runAgentTask(
         await distillMemory('done');
         return { status: 'done', summary, usage: totalUsage };
       }
+      // 失败分类：先识别可早退/可特殊路径的形状，再走通用重试。
+      const classification = classifyFailure(raw);
+      // refusal：模型明确拒绝执行——不再烧重试，直接终态 failed。
+      // 节省一轮 35-55s 的 LLM 往返，并保留诊断摘要便于定位。
+      if (classification.kind === 'refusal') {
+        await safeCdpDetach(tabId);
+        safeHideOverlay(tabId);
+        const body = classification.body;
+        return {
+          status: 'failed',
+          summary: `模型拒绝执行: ${body.replace(/\s+/g, ' ').slice(0, 120)}`,
+          usage: totalUsage,
+        };
+      }
+      // think-only：剥掉 <think> 后无 JSON。走专用重试 prompt 跳过思考过程；
+      // 连续 2 次仍不出 JSON → 终态 failed，提示用户该模型与当前 API 格式可能不兼容。
+      // threshold=2 是分类器设计的一部分：generic 形状仍走 consecutiveFormatErrors>=2 的旧闸。
+      if (classification.kind === 'think-only') {
+        consecutiveThinkOnly++;
+        if (consecutiveThinkOnly >= 2) {
+          await safeCdpDetach(tabId);
+          safeHideOverlay(tabId);
+          return {
+            status: 'failed',
+            summary: '模型连续输出思考内容但未给出动作 JSON（推理模型与当前 API 格式可能不兼容，建议换模型或在设置中调整）',
+            usage: totalUsage,
+          };
+        }
+        // 占位替换 raw：不再把整段 think 灌回历史污染下轮；保留分类器之前看到的形状供下轮诊断。
+        messages.push({ role: 'assistant', content: '[上轮输出无法解析为动作 JSON，已忽略]' });
+        messages.push({
+          role: 'user',
+          content: '请跳过思考过程，直接给出下一步的 JSON 动作对象（不要输出 <think> 标签）。',
+        });
+        continue;
+      }
+      // generic：保留旧的「consecutiveFormatErrors >= 2 闸 + 占位回灌 + 中性重试 prompt」组合。
       consecutiveFormatErrors++;
-      messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候、前后缀文字或思考过程，直接输出 JSON' });
+      // think-only 连击被 generic 打断，计数归零（否则隔步复现会误判「连续」）。
+      consecutiveThinkOnly = 0;
+      messages.push({ role: 'assistant', content: '[上轮输出无法解析为动作 JSON，已忽略]' });
+      messages.push({
+        role: 'user',
+        content: '上轮回复无法解析。请直接输出一个 JSON 动作对象，不要输出 <think> 标签。',
+      });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        const diag = ` [finish_reason=${lastFinishReason ?? '?'}, 输出长度=${raw.length}]`;
-        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}${diag}`, usage: totalUsage };
+        return {
+          status: 'failed',
+          summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
+          usage: totalUsage,
+        };
       }
       continue;
     }
@@ -692,18 +812,29 @@ export async function runAgentTask(
     try {
       action = JSON.parse(json);
     } catch {
+      // extractJson 已经过了字符串感知配平扫描；这里能抛说明抓到的是非法 JSON
+      // （如转义不闭合、混入非法字符）——视为 generic 格式错误，走通用重试。
       consecutiveFormatErrors++;
-      messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: '格式错误：请只回复一个 JSON 动作对象，不要输出任何解释、问候、前后缀文字或思考过程，直接输出 JSON' });
+      consecutiveThinkOnly = 0;
+      messages.push({ role: 'assistant', content: '[上轮输出无法解析为动作 JSON，已忽略]' });
+      messages.push({
+        role: 'user',
+        content: '上轮回复无法解析。请直接输出一个 JSON 动作对象，不要输出 <think> 标签。',
+      });
       if (consecutiveFormatErrors >= 2) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        const diag = ` [finish_reason=${lastFinishReason ?? '?'}, 输出长度=${raw.length}]`;
-        return { status: 'failed', summary: `模型输出格式错误: ${raw.replace(/\s+/g, ' ').slice(0, 120)}${diag}`, usage: totalUsage };
+        return {
+          status: 'failed',
+          summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
+          usage: totalUsage,
+        };
       }
       continue;
     }
     consecutiveFormatErrors = 0;
+    // 成功解析出动作：think-only 连击同时归零（两次 think-only 必须是真「连续」）。
+    consecutiveThinkOnly = 0;
 
     messages.push({ role: 'assistant', content: raw });
 

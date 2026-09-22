@@ -29,6 +29,12 @@ let sawDistill = 0;
 // 记忆测试：system prompt 带记忆段（「已知事实」）的请求数（用计数而非布尔锁存，
 //  runner 按前后差值断言，mock 进程跨多次运行不复位也不影响）
 let sawMemoryInjection = 0;
+// 格式错误测试：think-only fixture 返回的请求数（按任务 key 区分任务间计数，
+//  runner 用前后差值断言「连续 2 次即早退，不应有第 3 次」）。
+let thinkOnlyServed = 0;
+// 格式错误测试：refusal fixture 返回的请求数（同上用途）。
+let refusalServed = 0;
+let formatRecoveryServed = 0;
 // 快路径测试：/v1/systemone（Jev mock）总调用数；快路径测试场景的调用序计数；
 // 选中元素 id（即快路径直执点击、绕过 LLM）的次数
 let sawJev = 0;
@@ -361,11 +367,50 @@ function decideAction(messages) {
   }
   const hasFormatRecovery = allUserText.includes('格式容错');
   if (hasFormatRecovery) {
-    if (last.includes('格式错误：请只回复')) {
+    // 旧版 retry prompt 关键词「格式错误：请只回复」已下线；分类器把它分流到 generic 路径，
+    // 新 prompt 是中性「上轮回复无法解析。请直接输出一个 JSON 动作对象，不要输出 <think> 标签。」
+    // 第一次返回纯 think（无 JSON）→ classifyFailure 判 think-only → 专用重试 prompt
+    // 「请跳过思考过程，直接给出下一步的 JSON 动作对象」。
+    // 第二次见到这个专用 prompt 就该返回正常 JSON 完成。
+    if (last.includes('请跳过思考过程')) {
+      formatRecoveryServed += 1;
       return { tool: 'done', summary: '格式重试后完成' };
     }
     return {
       __raw: '<think>The user wants me to output only a single JSON action object. I need to redo my response properly. I was outputti',
+    };
+  }
+  // FORMAT_THINK_ONLY fixture：任务文本含此 sentinel。
+  // 头两次（占位前的初始请求 + 专用重试 prompt 触发的二次请求）返回纯 think（无 JSON），
+  // 触发分类器 think-only 路径 + 连续 2 次即终态的早退闸。runner 断言任务请求数 == 2，
+  // 不应看到第 3 次请求。统计 thinkOnlyServed 供差值断言。
+  if (taskLine.includes('FORMAT_THINK_ONLY')) {
+    // 第一次：包含一个闭合 think（剥完为空 → 无 `{` → think-only）
+    // 第二次：包含一个未闭合 think（剥完也是空 → 仍 think-only → 触发连续 2 次闸，任务终态）
+    if (thinkOnlyServed === 0) {
+      thinkOnlyServed += 1;
+      return {
+        __raw: '<think>Let me think step by step about what action to take here. The page shows a search form. I need to figure out the right click target. Should I click the input first or the button? Let me consider the layout again.',
+      };
+    }
+    if (thinkOnlyServed === 1) {
+      thinkOnlyServed += 1;
+      return {
+        // 未闭合 think：finish_reason=stop 但 think 没闭合 → 剥后仍空 → 仍 think-only
+        __raw: '<think>Step 1: analyze. Step 2: consider. Step 3: maybe click. Step 4: reconsider. Step 5: still thinking',
+      };
+    }
+    // 不应到达这里：runner 验证任务在第 2 次后即终态，第 3 次请求不会被发出来。
+    // 防御性返回 done 以免后续 mock 卡死。
+    return { tool: 'done', summary: 'FORMAT_THINK_ONLY: 第 3 次未预期' };
+  }
+  // FORMAT_REFUSAL fixture：任务文本含此 sentinel。
+  // 一次返回「think + 抱歉...」→ classifyFailure 判 refusal → 一次即终态。
+  // runner 断言任务请求数 == 1。
+  if (taskLine.includes('FORMAT_REFUSAL')) {
+    refusalServed += 1;
+    return {
+      __raw: '<think>This task is asking me to do something I should decline. Let me respond appropriately to the user.</think>\n抱歉，我无法执行该操作。这超出了我的能力范围。',
     };
   }
   const hasTrailingContent = allUserText.includes('尾随正文');
@@ -569,7 +614,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/__stats') {
-    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard, sawEntry, sawDistill, sawMemoryInjection, sawJev, sawJevClick, reqBytes });
+    writeJson(res, 200, { reqCount, sawImage, sawSteer, sawHistory, sawUpload, sawDialog, sawAutoAlert, sawDialogGuard, sawEntry, sawDistill, sawMemoryInjection, sawJev, sawJevClick, thinkOnlyServed, refusalServed, formatRecoveryServed, reqBytes });
     return;
   }
 
