@@ -1,4 +1,5 @@
 import type { PageSnapshot } from './actions';
+import type { ChatUsage } from '../llm';
 import { buildSnapshotMessage } from './prompt';
 
 /**
@@ -34,6 +35,8 @@ export interface JevVerdict {
   taskDone: number | null;
   /** 本次调用耗时（ms）。 */
   ms: number;
+  /** Jev /systemone 响应里的 token 用量（provider 不给则为 undefined；与 LLM line 独立计算）。 */
+  usage?: ChatUsage;
 }
 
 interface JevResponse {
@@ -41,6 +44,8 @@ interface JevResponse {
     next?: { type: string; choice?: string; confidence?: number };
     task_done?: { type: string; noul?: number };
   };
+  /** /systemone 响应里的 token 用量；非必有（provider 不回 usage 时为 undefined）。 */
+  usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
 }
 
 /** 动作去重键：用元素身份（tag+text）而非快照 id——id 随页面渲染漂移，
@@ -129,7 +134,14 @@ export async function jevFastPath(
     } else if (choice === OPT_SCROLL_UP) {
       action = { tool: 'scroll', direction: 'up' };
     }
-    return { action, confidence, choice, taskDone, ms: Date.now() - t0 };
+    const u = data.usage;
+    let usage: ChatUsage | undefined;
+    if (u && typeof u === 'object') {
+      const p = Number(u.prompt_tokens);
+      const c = Number(u.completion_tokens);
+      if (Number.isFinite(p) && Number.isFinite(c)) usage = { prompt: p, completion: c };
+    }
+    return { action, confidence, choice, taskDone, ms: Date.now() - t0, usage };
   } catch {
     return null;
   }

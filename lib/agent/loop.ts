@@ -81,6 +81,11 @@ export interface AgentResult {
   summary: string;
   /** 任务全程 LLM token 用量累计（provider 不给 usage 时各字段为 0）。 */
   usage: ChatUsage;
+  /** 任务全程 Jev（System One 快路径）token 用量累计；与 usage 独立（不同 provider）。 */
+  jevUsage: ChatUsage;
+  /** 本任务是否发生过 Jev HTTP 调用（即便被快路径回退大模型、usage 字段为 0 也为 true）——
+   *  sidepanel 据此决定是否显示 Jev 用量行。 */
+  jevCalled: boolean;
   /** status 为 max-steps 时携带：完整对话历史 + 目标标签页，用于无缝续跑 */
   continuation?: AgentContinuation;
 }
@@ -90,6 +95,10 @@ export interface AgentContinuation {
   tabId: number;
   messages: OutgoingMessage[];
   usage: ChatUsage;
+  /** 续跑点携带此前累计的 Jev 用量，供 sidepanel 续跑后展示与再累加。 */
+  jevUsage: ChatUsage;
+  /** 续跑点携带此前是否调用过 Jev。 */
+  jevCalled: boolean;
 }
 
 /** 契约定义的高危关键词正则。 */
@@ -454,6 +463,11 @@ export async function runAgentTask(
   let rememberHint = REMEMBER_HINT_RE.test(task);
   const resume = opts?.resume;
   const totalUsage: ChatUsage = resume ? { ...resume.usage } : { prompt: 0, completion: 0 };
+  /** Jev（System One 快路径）累计用量；与 totalUsage 独立。续跑时从 resume.jevUsage 接力。 */
+  const totalJevUsage: ChatUsage = resume ? { ...resume.jevUsage } : { prompt: 0, completion: 0 };
+  /** 本任务是否发生过 Jev HTTP 调用（一旦 jevFastPath 返回非 null 即置 true）。
+   *  续跑时从 resume.jevCalled 接力——此前调用过就一直保留。 */
+  let jevCalled: boolean = resume ? resume.jevCalled : false;
 
   let tabId: number;
   if (resume) {
@@ -462,12 +476,12 @@ export async function runAgentTask(
     try {
       await chrome.tabs.get(tabId);
     } catch {
-      return { status: 'failed', summary: '原标签页已关闭，无法继续任务', usage: totalUsage };
+      return { status: 'failed', summary: '原标签页已关闭，无法继续任务', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
     }
   } else {
     const resolvedTabId = await getTargetTabId();
     if (resolvedTabId === null) {
-      return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage };
+      return { status: 'failed', summary: '找不到可操作的标签页', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
     }
     tabId = resolvedTabId;
   }
@@ -477,7 +491,7 @@ export async function runAgentTask(
     return {
       status: 'failed',
       summary: '当前页面不支持自动化（chrome://、新建标签页、应用商店等页面不可用），请切换到普通网页后再试',
-      usage: totalUsage,
+      usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
     };
   }
 
@@ -503,7 +517,7 @@ export async function runAgentTask(
     return {
       status: 'failed',
       summary: isPerm ? '没有页面访问权限，请点击允许后重试' : `页面操作失败: ${errMsg.slice(0, 200)}`,
-      usage: totalUsage,
+      usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
     };
   }
   await runInPage<unknown>(tabId, showOverlay, [], signal);
@@ -693,6 +707,12 @@ export async function runAgentTask(
     ) {
       const verdict = await jevFastPath(settings.jevKey, settings.jevBaseUrl, task, snapshot, signal, jevRecent);
       if (verdict) {
+        // 任何 Jev HTTP 返回都算「调用过」——即便回退大模型，usage 也按 0 显示（提示 Jev 在工作但 provider 未回 usage）。
+        jevCalled = true;
+        if (verdict.usage) {
+          totalJevUsage.prompt += verdict.usage.prompt;
+          totalJevUsage.completion += verdict.usage.completion;
+        }
         const key = jevActionKey(verdict.action, snapshot);
         if (verdict.action && verdict.confidence >= JEV_CONFIDENCE_MIN && !jevUsedKeys.has(key)) {
           jevAction = verdict.action;
@@ -732,7 +752,7 @@ export async function runAgentTask(
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
         const msg = err instanceof Error ? err.message : String(err);
-        return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage };
+        return { status: 'failed', summary: `LLM 调用失败: ${msg}`, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
       }
     }
     const json = extractJson(raw);
@@ -749,7 +769,7 @@ export async function runAgentTask(
         lastSummary = summary;
         onStep({ tool: 'done', args: { summary: `${salvaged.slice(0, 30)}…（截断抢救）` }, ok: true, info: summary });
         await distillMemory('done');
-        return { status: 'done', summary, usage: totalUsage };
+        return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
       }
       // 失败分类：先识别可早退/可特殊路径的形状，再走通用重试。
       const classification = classifyFailure(raw);
@@ -762,7 +782,7 @@ export async function runAgentTask(
         return {
           status: 'failed',
           summary: `模型拒绝执行: ${body.replace(/\s+/g, ' ').slice(0, 120)}`,
-          usage: totalUsage,
+          usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
         };
       }
       // think-only：剥掉 <think> 后无 JSON。走专用重试 prompt 跳过思考过程；
@@ -776,7 +796,7 @@ export async function runAgentTask(
           return {
             status: 'failed',
             summary: '模型连续输出思考内容但未给出动作 JSON（推理模型与当前 API 格式可能不兼容，建议换模型或在设置中调整）',
-            usage: totalUsage,
+            usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
           };
         }
         // 占位替换 raw：不再把整段 think 灌回历史污染下轮；保留分类器之前看到的形状供下轮诊断。
@@ -802,7 +822,7 @@ export async function runAgentTask(
         return {
           status: 'failed',
           summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
-          usage: totalUsage,
+          usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
         };
       }
       continue;
@@ -827,7 +847,7 @@ export async function runAgentTask(
         return {
           status: 'failed',
           summary: formatErrorDiag(raw, lastFinishReason, lastReasoningChars),
-          usage: totalUsage,
+          usage: totalUsage, jevUsage: totalJevUsage, jevCalled,
         };
       }
       continue;
@@ -872,7 +892,7 @@ export async function runAgentTask(
       if (!allowed) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage };
+        return { status: 'failed', summary: '用户拒绝了高危操作', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
       }
     }
 
@@ -1175,7 +1195,7 @@ export async function runAgentTask(
       onStep({ tool, args: argsForStep, ok: true, info: summary });
       safeHideOverlay(tabId);
       await distillMemory('done');
-      return { status: 'done', summary, usage: totalUsage };
+      return { status: 'done', summary, usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
     } else {
       ok = false;
       info = `unknown tool ${tool}`;
@@ -1251,7 +1271,7 @@ export async function runAgentTask(
       if (err instanceof AbortedError || signal?.aborted) {
         await safeCdpDetach(tabId);
         safeHideOverlay(tabId);
-        return { status: 'stopped', summary: '用户已中止', usage: totalUsage };
+        return { status: 'stopped', summary: '用户已中止', usage: totalUsage, jevUsage: totalJevUsage, jevCalled: jevCalled };
       }
       throw err;
     }
@@ -1264,6 +1284,8 @@ export async function runAgentTask(
     status: 'max-steps',
     summary: lastSummary || `已达最大步数 ${maxSteps}`,
     usage: totalUsage,
-    continuation: { task, tabId, messages, usage: totalUsage },
+    jevUsage: totalJevUsage,
+    jevCalled,
+    continuation: { task, tabId, messages, usage: totalUsage, jevUsage: totalJevUsage, jevCalled },
   };
 }

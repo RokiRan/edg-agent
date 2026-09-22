@@ -139,6 +139,10 @@ function App() {
   const [pendingAsk, setPendingAsk] = useState<AskState | null>(null);
   /** 最近一次 agent 任务的 token 用量（footer 显示；新任务开始时清零）。 */
   const [lastUsage, setLastUsage] = useState<ChatUsage | null>(null);
+  /** 最近一次 agent 任务的 Jev 用量 + 是否真发生 Jev 调用（footer 显示「Jev 行」用）。 */
+  const [lastJev, setLastJev] = useState<{ usage: ChatUsage; called: boolean } | null>(null);
+  /** 最近一次纯聊天路径的 token 用量（footer 单独显示；与 agent 行互斥）。 */
+  const [lastChatUsage, setLastChatUsage] = useState<ChatUsage | null>(null);
   /** 待随任务发送的本地附件（xlsx/docx 解析文本）；发送后清空。 */
   const [attachment, setAttachment] = useState<{ name: string; text: string } | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -249,6 +253,8 @@ function App() {
     setAttachment(null);
     setAttachError(null);
     setLastUsage(null);
+    setLastJev(null);
+    setLastChatUsage(null);
     // 挂起的确认/提问必须先拒绝式解决，否则 loop 永远等 resolve，isStreaming 卡死
     setPendingConfirm((cur) => {
       cur?.resolve(false);
@@ -296,7 +302,10 @@ function App() {
     abortRef.current = controller;
     currentAgentMsgIdRef.current = messageId;
     setIsStreaming(true);
-    if (!resume) setLastUsage(null);
+    if (!resume) {
+      setLastUsage(null);
+      setLastJev(null);
+    }
 
     try {
       const result = await runAgentTask(task, settings, {
@@ -360,6 +369,7 @@ function App() {
         content: result.summary,
       }));
       setLastUsage(result.usage.prompt + result.usage.completion > 0 ? result.usage : null);
+      setLastJev({ usage: result.jevUsage, called: result.jevCalled });
     } catch (err) {
       const e = err as { message?: string };
       continuationRef.current = null;
@@ -503,7 +513,7 @@ function App() {
     history.push({ role: 'user', content: messageText });
 
     try {
-      await streamChat(
+      const chatUsage = await streamChat(
         settings,
         history,
         (delta) => {
@@ -515,6 +525,10 @@ function App() {
         },
         controller.signal
       );
+      // 正常结束（非 abort）才记录本次用量；abort 时不展示半截统计避免误导
+      if (!controller.signal.aborted) {
+        setLastChatUsage(chatUsage);
+      }
     } catch (err) {
       const e = err as { name?: string; message?: string };
       const isAbort = e.name === 'AbortError';
@@ -818,6 +832,16 @@ function App() {
               {agentMode && lastUsage && (
                 <span data-testid="token-usage">
                   ↑{fmtTokens(lastUsage.prompt)} ↓{fmtTokens(lastUsage.completion)}
+                </span>
+              )}
+              {agentMode && lastJev?.called && (
+                <span data-testid="jev-token-usage" className="text-[#3a4450]">
+                  Jev ↑{fmtTokens(lastJev.usage.prompt)} ↓{fmtTokens(lastJev.usage.completion)}
+                </span>
+              )}
+              {!agentMode && lastChatUsage && (
+                <span data-testid="token-usage">
+                  ↑{fmtTokens(lastChatUsage.prompt)} ↓{fmtTokens(lastChatUsage.completion)}
                 </span>
               )}
             </div>

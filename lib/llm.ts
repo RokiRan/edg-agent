@@ -50,7 +50,7 @@ export async function streamChat(
   messages: OutgoingMessage[],
   onDelta: (text: string) => void,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<ChatUsage | null> {
   const baseUrl = settings.baseUrl.replace(/\/+$/, '');
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -62,10 +62,10 @@ export async function streamChat(
       model: settings.model,
       messages,
       stream: true,
+      stream_options: { include_usage: true },
     }),
     signal,
   });
-
   if (!res.ok) {
     const text = (await res.text()).slice(0, 300);
     throw new Error(`LLM 请求失败 (${res.status}): ${text}`);
@@ -79,6 +79,10 @@ export async function streamChat(
   const decoder = new TextDecoder();
   let buffer = '';
 
+  /** 本次流累计到的 token 用量；后到的覆盖先到的（OpenAI 习惯把 usage 放最后一个
+   *  含空 choices 的 chunk）。provider 不给 usage 时保持 null，调用方按 null 隐藏。 */
+  let lastUsage: ChatUsage | null = null;
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -90,11 +94,18 @@ export async function streamChat(
       buffer = buffer.slice(idx + 1);
       if (!line.startsWith('data: ')) continue;
       const data = line.slice(6);
-      if (data === '[DONE]') return;
+      if (data === '[DONE]') return lastUsage;
       try {
         const json = JSON.parse(data);
         const delta = json?.choices?.[0]?.delta?.content;
         if (delta) onDelta(delta);
+        // usage 通常出现在流末含空 choices 的 chunk；任意带 usage 的 chunk 都采，后到覆盖先到。
+        const u = json?.usage;
+        if (u && typeof u === 'object') {
+          const p = Number((u as { prompt_tokens?: unknown }).prompt_tokens);
+          const c = Number((u as { completion_tokens?: unknown }).completion_tokens);
+          if (Number.isFinite(p) && Number.isFinite(c)) lastUsage = { prompt: p, completion: c };
+        }
       } catch {
         // 跳过无法解析的行
       }
@@ -111,12 +122,19 @@ export async function streamChat(
           const json = JSON.parse(data);
           const delta = json?.choices?.[0]?.delta?.content;
           if (delta) onDelta(delta);
+          const u = json?.usage;
+          if (u && typeof u === 'object') {
+            const p = Number((u as { prompt_tokens?: unknown }).prompt_tokens);
+            const c = Number((u as { completion_tokens?: unknown }).completion_tokens);
+            if (Number.isFinite(p) && Number.isFinite(c)) lastUsage = { prompt: p, completion: c };
+          }
         } catch {
           // 忽略尾部残留解析错误
         }
       }
     }
   }
+  return lastUsage;
 }
 
 /**

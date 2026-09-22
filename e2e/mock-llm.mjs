@@ -491,7 +491,7 @@ function writeJson(res, status, payload) {
   res.end(body);
 }
 
-function writeSse(res, contentString) {
+function writeSse(res, contentString, usage) {
   if (res.destroyed) return;
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -499,8 +499,13 @@ function writeSse(res, contentString) {
     Connection: 'keep-alive',
     ...CORS_HEADERS,
   });
+  // 内容块：choices 流式 delta；usage 段后到避免与正文顺序耦合。
   const chunk = { choices: [{ delta: { content: contentString } }] };
   res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  if (usage) {
+    // OpenAI 流式约定：最后一个 chunk 含空 choices + usage（与 stream_options.include_usage 配套）
+    res.write(`data: ${JSON.stringify({ choices: [], usage })}\n\n`);
+  }
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -554,7 +559,12 @@ const server = http.createServer((req, res) => {
  ? action.__raw
  : JSON.stringify(action);
       if (stream) {
-        writeSse(res, contentString);
+        // 与非流式 usage 计算口径一致——按请求体/响应体字节数估值，保证 e2e 中 token-usage 行数值稳定。
+        const usage = {
+          prompt_tokens: Math.ceil(raw.length / 4),
+          completion_tokens: Math.ceil(contentString.length / 4),
+        };
+        writeSse(res, contentString, usage);
       } else {
         writeJson(res, 200, {
           choices: [{ message: { role: 'assistant', content: contentString } }],
@@ -606,7 +616,7 @@ const server = http.createServer((req, res) => {
           next: { type: 'choice', choice, probabilities: { [choice]: 0.9 }, confidence: 0.9 },
           task_done: { type: 'noul', noul: 0.05 },
         },
-        usage: { input_tokens: Math.ceil(raw.length / 4), output_tokens: 20 },
+        usage: { prompt_tokens: Math.ceil(raw.length / 4), completion_tokens: 20 },
       });
     });
     req.on('error', () => {});
